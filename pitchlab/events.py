@@ -7,17 +7,26 @@
   BR   ball release
 
 Order of detection:
-  BR0  peak throwing-wrist speed relative to the pelvis in the image (a first, rough release time).
+  BR0  peak throwing-wrist speed relative to the pelvis in the image, untracked stretches of up to
+       0.25 s bridged (a first, rough release time). If no foot plant is found from it, the hand-based
+       release below is searched where foot plant usually is relative to BR0.
   PKH  highest lead-knee position 1.5-0.25 s before release.
   FP   first frame after PKH at which the lead ankle (as the camera sees it) is both slow - below a
        fraction of its peak stride speed - and within a small radius of where it sits planted at release.
        Speed alone fails for pitchers whose foot stops travelling toward home and then drops, and from
        behind the plate, where the stride runs along the camera axis; the planted-position test fixes both.
+       Side-on video also has the lead heel and toe: the same test on them finds the touch-down, and
+       foot plant (full weight) is Driveline's median contact-to-full-weight time later, if that comes
+       before the ankle rule fires. MediaPipe's ankle point sits on the lower shin and keeps creeping
+       forward while the shin rolls over the planted foot, which made foot plant read late on a real clip.
   BR   side-on: the moment the throwing hand passes a calibrated distance in front of the throwing
        shoulder toward home (on Driveline data that times release to ~4 ms), interpolated across frames
        where the arm is blurred. The speed peak cannot do this: at 60 fps the arm is untracked or mislabelled
-       for several frames around release and the "peak" lands on a tracking glitch. Other views: BR0 plus
-       a calibrated offset. PKH and FP are then re-detected against the final release time.
+       for several frames around release and the "peak" lands on a tracking glitch. When the arm is lost
+       for too long to bridge (dim light: blurred from layback until well after release), release is
+       extrapolated from the hand's last tracked position with Driveline's median arm path and marked
+       "estimated". Other views: BR0 plus a calibrated offset. PKH and FP are then re-detected against the
+       final release time.
   MER  maximum shoulder external rotation between FP and BR, when the arm was really tracked through
        layback; otherwise the Driveline median time before release, marked "estimated".
 The constants are calibrated against Driveline's force-plate/ball events on simulated phone video by
@@ -37,11 +46,19 @@ DEFAULT_CALIBRATION = {
     "fp_speed_fraction_behind": 0.2,  # the same two for a camera behind / in front of the pitcher
     "fp_plant_radius_behind": 0.03,
     "fp_to_br_median_s": 0.136,      # Driveline median, used only when FP cannot be found
+    "fc_to_fp_median_s": 0.019,      # Driveline median from first foot contact (10% body weight) to FP
     "mer_to_br_median_s": 0.031,
     "br_hand_ahead": 0.41,           # BR: hand this many leg lengths in front of the shoulder (side-on)
     "br_hand_offset_s": 0.0,         # BR = hand-crossing time + offset
+    # Driveline median time from the hand's last pass of each hand-ahead level to release (side-on), from
+    # the end of the layback (the first level, below which pitchers hold the layback for very different
+    # times) up to the release level
+    "br_hand_path": {"levels": [-0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4],
+                     "dt_s": [0.047, 0.040, 0.035, 0.031, 0.027, 0.024, 0.021, 0.018, 0.015, 0.012, 0.009,
+                              0.006, 0.003, 0.0]},
 }
 EVENT_NAMES = ("pkh", "fp", "mer", "br")
+ER_MIN_ELBOW_FLEXION = 30.0     # degrees; shoulder ER is undefined with a straighter elbow
 
 
 def calib_for_view(calib: dict, view: str) -> dict:
@@ -136,8 +153,27 @@ def detect_fp(t: np.ndarray, foot_speed: np.ndarray, foot_pos: np.ndarray, br: i
     return None
 
 
-def detect_mer(t: np.ndarray, shoulder_er: np.ndarray, fp: int, br: int) -> int | None:
-    return _argmax_in(shoulder_er, np.arange(fp, br + 1))
+def detect_contact(t: np.ndarray, kin: dict[str, np.ndarray], br: int, pkh: int | None, calib: dict) -> int | None:
+    """First touch-down of the lead foot in side-on video: the earlier of heel and toe passing the
+    foot-plant test (slow, and at the spot where that point sits planted at release), so a toe-first
+    landing counts too. None without foot landmarks or when neither point settles before release."""
+    hits = [detect_fp(t, kin[f"{p}_speed"], kin[f"{p}_pos"], br, pkh, calib)
+            for p in ("heel", "toe") if f"{p}_pos" in kin]
+    hits = [h for h in hits if h is not None]
+    return min(hits) if hits else None
+
+
+def detect_mer(t: np.ndarray, shoulder_er: np.ndarray, fp: int, br: int,
+               elbow_flexion: np.ndarray | None = None) -> int | None:
+    """Sample of maximum shoulder external rotation between foot plant and release. ER is measured from the
+    forearm's direction around the upper arm, which is undefined while the elbow is nearly straight - as it
+    is at release - and there swings by up to 180 degrees on noise alone (on simulated video such a swing
+    at release passed for a 350-degree layback). Samples with the elbow bent less than
+    ER_MIN_ELBOW_FLEXION are skipped; at real layback it is bent about 90 degrees."""
+    idx = np.arange(fp, br + 1)
+    if elbow_flexion is not None:
+        idx = idx[~(elbow_flexion[idx] < ER_MIN_ELBOW_FLEXION)]
+    return _argmax_in(shoulder_er, idx)
 
 
 def detect_br_hand(t: np.ndarray, hand_ahead: np.ndarray, fp: int, calib: dict) -> int | None:
@@ -162,6 +198,56 @@ def detect_br_hand(t: np.ndarray, hand_ahead: np.ndarray, fp: int, calib: dict) 
     return _nearest(t, best[1] + calib.get("br_hand_offset_s", 0.0))
 
 
+def release_from_last_tracked(t: np.ndarray, hand_ahead: np.ndarray, fp: int, calib: dict) -> int | None:
+    """Release when the throwing arm was untracked from before release until after it (a blur gap too
+    long to bridge, so `hand_ahead` is NaN there and shows no crossing). For each untracked stretch that
+    starts within 0.45 s after foot plant and has tracking after it, release is extrapolated from the last
+    tracked sample before it with Driveline's median time from that hand position to release. The table
+    describes the hand on its way forward from the end of the layback; a hand last seen still laid back
+    (behind the table's first level, where pitchers hold the layback for very different times) or still
+    moving back is taken to have turned forward when the blur began - fast motion is what blurs it - and
+    is timed from the table's first level. The last tracked sample is looked for in the same window as
+    the hand crossing, 0.05 s before to 0.45 s after foot plant.
+
+    A stretch is rejected if the extrapolated release falls after its end, or if within 0.1 s after that
+    release the hand is tracked still laid back (behind the table's first level) or further back than its
+    last position: the arm was still cocking, as in a mirrored-body glitch while the arm swings back. Of
+    the rest, the stretch after the deepest layback wins."""
+    path = calib.get("br_hand_path") or DEFAULT_CALIBRATION["br_hand_path"]
+    levels, dt = np.asarray(path["levels"], dtype=float), np.asarray(path["dt_s"], dtype=float)
+    finite = np.isfinite(hand_ahead)
+    n = len(t)
+    best: tuple[float, float] | None = None       # (hand-ahead at the last tracked sample, release time)
+    i = int(np.searchsorted(t, t[fp] - 0.05))
+    while i < n - 1 and t[i] <= t[fp] + 0.45:
+        if not (finite[i] and not finite[i + 1]):
+            i += 1
+            continue
+        j = i + 1
+        while j < n and not finite[j]:
+            j += 1
+        a = float(hand_ahead[i])
+        earlier = np.flatnonzero(finite[:i] & (t[:i] >= t[i] - 0.03))
+        k = earlier[np.argmin(np.abs(t[earlier] - (t[i] - 0.02)))] if earlier.size else None
+        moving_back = k is not None and a < hand_ahead[k] - 0.02
+        if j < n and a < calib["br_hand_ahead"]:
+            t_br = t[i] + float(np.interp(levels[0] if moving_back else max(a, levels[0]), levels, dt))
+            after = finite & (t > t_br) & (t <= t_br + 0.1)
+            still_cocking = (hand_ahead[after] < max(a, levels[0])).any()
+            if t_br < t[j] and not still_cocking and (best is None or a < best[0]):
+                best = (a, t_br)
+        i = j
+    return None if best is None else _nearest(t, best[1])
+
+
+def release_hand_speed(t: np.ndarray, wrist_speed: np.ndarray, br: int) -> float:
+    """Peak throwing-hand speed (leg lengths/s, as the camera sees it) within 0.1 s of release: a real pitch
+    is far faster than an arm swing before release or a slow-motion clip played at its playback rate."""
+    sel = (t >= t[br] - 0.1) & (t <= t[br] + 0.1)
+    vals = wrist_speed[sel]
+    return float(np.nanmax(vals)) if sel.any() and np.isfinite(vals).any() else float("nan")
+
+
 def _arm_tracked(arm_valid: np.ndarray, t: np.ndarray, lo_s: float, hi_s: float) -> bool:
     idx = _window(t, lo_s, hi_s)
     return bool(idx.size) and bool(arm_valid[idx].all())
@@ -172,7 +258,7 @@ def detect_events(t: np.ndarray, kin: dict[str, np.ndarray], calib: dict | None 
     notes: list[str] = []
     source = {k: "auto" for k in EVENT_NAMES}
 
-    br, peak = detect_br(t, kin["wrist_speed"], c)
+    br, peak = detect_br(t, kin.get("wrist_speed_bridged", kin["wrist_speed"]), c)
     if t[peak] - t[0] < 0.25:
         notes.append("Peak arm speed is within 0.25 s of the clip start; the clip may begin too late.")
     if t[-1] - t[peak] < 0.05:
@@ -180,16 +266,34 @@ def detect_events(t: np.ndarray, kin: dict[str, np.ndarray], calib: dict | None 
 
     def lower_body(br: int) -> tuple[int | None, int | None]:
         pkh = detect_pkh(t, kin["knee_height"], br)
-        return pkh, detect_fp(t, kin["foot_speed"], kin["foot_pos"], br, pkh, c)
+        fp = detect_fp(t, kin["foot_speed"], kin["foot_pos"], br, pkh, c)
+        contact = detect_contact(t, kin, br, pkh, c)
+        if contact is not None:
+            fp_contact = _nearest(t, t[contact] + c["fc_to_fp_median_s"])
+            if fp_contact < br and (fp is None or fp_contact < fp):
+                fp = fp_contact
+        return pkh, fp
 
     pkh, fp = lower_body(br)
-    if fp is not None and "hand_ahead" in kin:
-        br_hand = detect_br_hand(t, kin["hand_ahead"], fp, c)
-        if br_hand is not None and br_hand > fp:
+    if "hand_ahead" in kin:
+        # Without a foot plant the rough release is far off (with the arm lost through release, the fastest
+        # movement left in the clip can be anywhere): search where foot plant usually is relative to it.
+        anchor = fp if fp is not None else _nearest(t, t[br] - c["fp_to_br_median_s"])
+        br_hand = detect_br_hand(t, kin["hand_ahead"], anchor, c)
+        extrapolated = br_hand is None
+        if extrapolated:
+            br_hand = release_from_last_tracked(t, kin["hand_ahead"], anchor, c)
+        if br_hand is not None and br_hand > anchor:
             br = br_hand
             pkh2, fp2 = lower_body(br)          # windows follow the final release time
             if fp2 is not None and fp2 < br:
                 pkh, fp = pkh2, fp2
+            if extrapolated:
+                source["br"] = "estimated"
+                notes.append("The throwing arm was blurred out of tracking from layback until after release, "
+                             "so release is placed from the hand's last tracked position using Driveline's "
+                             "typical arm path (on simulated Driveline pitches usually within 2 frames at 60 fps). "
+                             "Check it on the video and correct it if needed.")
 
     if pkh is None:
         source["pkh"] = "missing"
@@ -205,7 +309,7 @@ def detect_events(t: np.ndarray, kin: dict[str, np.ndarray], calib: dict | None 
 
     arm_valid = kin.get("arm_valid")
     tracked = arm_valid is None or _arm_tracked(arm_valid, t, t[br] - 0.07, t[br] + 0.02)
-    mer = detect_mer(t, kin["shoulder_er"], fp, br) if tracked else None
+    mer = detect_mer(t, kin["shoulder_er"], fp, br, kin.get("elbow_flexion")) if tracked else None
     if mer is not None and mer == fp and br - fp > 2:
         # A "maximum" on the first sample is the window edge, not a layback peak.
         mer = None

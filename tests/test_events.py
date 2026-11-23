@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pitchlab.events import Events, detect_events, validate_order
+from pitchlab.events import DEFAULT_CALIBRATION, Events, detect_contact, detect_events, validate_order
 
 CAL = {"br_offset_s": 0.0, "fp_speed_fraction": 0.2, "fp_plant_radius": 0.03, "fp_to_br_median_s": 0.134}
 
@@ -36,8 +36,57 @@ def test_detects_all_events_in_order():
     validate_order(ev, len(t))
 
 
+def _with_foot_points(kin, t_heel=None, t_toe=None):
+    """Add heel / toe tracks that settle at the given times (a copy of the foot path arriving then)."""
+    for name, t_arrive in (("heel", t_heel), ("toe", t_toe)):
+        if t_arrive is not None:
+            _, point = synthetic_signals(t_fp=t_arrive)
+            kin[f"{name}_pos"], kin[f"{name}_speed"] = point["foot_pos"], point["foot_speed"]
+    return kin
+
+
+def test_foot_plant_follows_the_heel_touchdown_when_the_ankle_point_keeps_creeping():
+    # Real night clip: the heel landed 7 frames before MediaPipe's ankle point (on the lower shin) stopped
+    # creeping forward, so the ankle rule put foot plant 4 frames after the foot was flat.
+    t, kin = synthetic_signals()                                # ankle point settles at 1.36 s
+    ankle_only = detect_events(t, dict(kin), CAL).fp
+    kin = _with_foot_points(kin, t_heel=1.28, t_toe=1.31)
+    contact = detect_contact(t, kin, int(np.argmin(np.abs(t - 1.5))), None, {**DEFAULT_CALIBRATION, **CAL})
+    ev = detect_events(t, kin, CAL)
+    assert 1.24 < t[contact] <= 1.28 + 1 / 240                 # touch-down from the heel
+    assert t[ev.fp] == pytest.approx(t[contact] + DEFAULT_CALIBRATION["fc_to_fp_median_s"], abs=1 / 240)
+    assert ev.fp < ankle_only and ev.source["fp"] == "auto"
+
+
+def test_toe_first_landing_counts_as_touch_down():
+    t, kin = synthetic_signals()
+    kin = _with_foot_points(kin, t_heel=1.34, t_toe=1.29)
+    contact = detect_contact(t, kin, int(np.argmin(np.abs(t - 1.5))), None, {**DEFAULT_CALIBRATION, **CAL})
+    assert 1.25 < t[contact] <= 1.29 + 1 / 240
+
+
+def test_ankle_rule_stands_when_the_foot_lands_with_it():
+    # heel and toe settle with the ankle: touch-down + 19 ms comes after the ankle rule, which stays
+    t, kin = synthetic_signals()
+    ankle_only = detect_events(t, dict(kin), CAL).fp
+    assert detect_events(t, _with_foot_points(kin, t_heel=1.36, t_toe=1.36), CAL).fp == ankle_only
+
+
+def test_layback_ignores_the_undefined_rotation_of_a_straight_elbow():
+    # At release the elbow is nearly straight and the rotation angle (taken from the forearm's direction)
+    # swings by ~170 degrees on noise; on a simulated pitch that swing became a 354-degree "max layback".
+    t, kin = synthetic_signals()
+    br = int(np.argmin(np.abs(t - 1.5)))
+    kin["elbow_flexion"] = np.where(t < 1.49, 90.0, 5.0)        # elbow straightens over the last 10 ms
+    kin["shoulder_er"][br - 1:br + 1] = 354.0
+    ev = detect_events(t, kin, CAL)
+    assert t[ev.mer] == pytest.approx(1.47, abs=2 / 240) and ev.source["mer"] == "auto"
+
+
 def test_hovering_foot_is_not_planted_until_it_lands():
-    # the foot stops travelling forward 80 ms early (t = 1.28 s), slowly drops 0.06 leg lengths and lands at\n    # 1.36 s; speed alone would call foot plant at 1.28 s, the planted-radius test waits until it is within\n    # 0.03 leg lengths of the ground (1.32 s)
+    # the foot stops travelling forward 80 ms early (t = 1.28 s), slowly drops 0.06 leg lengths and lands at
+    # 1.36 s; speed alone would call foot plant at 1.28 s, the planted-radius test waits until it is within
+    # 0.03 leg lengths of the ground (1.32 s)
     t, kin = synthetic_signals(hover=0.08)
     ev = detect_events(t, kin, CAL)
     assert t[ev.fp] >= 1.315

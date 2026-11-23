@@ -21,6 +21,20 @@ from .pipeline import AnalysisError, Options, options_dict, read_json, run, writ
 
 log = logging.getLogger(__name__)
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
+INTERRUPTED = "The server stopped before this analysis finished. Upload it again."
+
+
+class Interrupted(Exception):
+    """The server is shutting down; the running analysis stops at the next progress update."""
+
+
+def summary_of(result: dict) -> dict:
+    """The few numbers the analyses list shows, recomputed whenever result.json changes."""
+    return {"throws": result["athlete"]["throws"],
+            "fps": round(result["video"]["fps_effective"]),
+            "camera_view": result["quality"]["camera_view"],
+            "warnings": len(result["quality"]["warnings"]),
+            "predictions": {p["target"]: round(p["value"], 1) for p in result.get("predictions", []) if p["reportable"]}}
 
 
 def now() -> str:
@@ -38,6 +52,7 @@ class Jobs:
         self._executor: ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
         self._live: dict[str, dict] = {}
+        self._stopping = threading.Event()
 
     # ---- storage
     def path(self, analysis_id: str) -> Path:
@@ -97,8 +112,7 @@ class Jobs:
             if d.is_dir() and mp.exists():
                 m = read_json(mp)
                 if m.get("status") in ("queued", "running", "uploading"):
-                    self._write_meta(d.name, status="failed", stage="Interrupted",
-                                     error="The server stopped before this analysis finished. Upload it again.")
+                    self._write_meta(d.name, status="failed", stage="Interrupted", error=INTERRUPTED)
 
     # ---- queue
     def submit(self, analysis_id: str) -> None:
@@ -109,7 +123,12 @@ class Jobs:
             executor = self._executor
         executor.submit(self._run, analysis_id)
 
+    def update_summary(self, analysis_id: str, result: dict) -> None:
+        self._write_meta(analysis_id, summary=summary_of(result))
+
     def _progress(self, analysis_id: str, frac: float, stage: str) -> None:
+        if self._stopping.is_set():
+            raise Interrupted()
         with self._lock:
             self._live[analysis_id] = {"progress": round(float(frac), 4), "stage": stage}
 
@@ -121,26 +140,36 @@ class Jobs:
         try:
             opts = Options.from_dict(m["options"])
             result = run(d, opts, d / m["input_file"], lambda f, s: self._progress(analysis_id, f, s))
-            pred = {p["target"]: round(p["value"], 1) for p in result.get("predictions", []) if p["reportable"]}
             self._write_meta(analysis_id, status="done", progress=1.0, stage="Done", finished_utc=now(),
-                             seconds=round(time.time() - t0, 1),
-                             summary={"throws": result["athlete"]["throws"],
-                                      "fps": round(result["video"]["fps_effective"]),
-                                      "camera_view": result["quality"]["camera_view"],
-                                      "warnings": len(result["quality"]["warnings"]),
-                                      "predictions": pred})
-        except AnalysisError as exc:
-            log.info("analysis %s failed: %s", analysis_id, exc)
-            self._write_meta(analysis_id, status="failed", stage="Failed", error=str(exc), finished_utc=now())
-        except Exception as exc:  # noqa: BLE001 - surfaced to the user, full trace in the log
-            log.error("analysis %s crashed:\n%s", analysis_id, traceback.format_exc())
-            self._write_meta(analysis_id, status="failed", stage="Failed", finished_utc=now(),
-                             error=f"Internal error ({type(exc).__name__}: {exc}). See the server log.")
+                             seconds=round(time.time() - t0, 1), summary=summary_of(result))
+        except Exception as exc:  # noqa: BLE001
+            self._fail(analysis_id, exc)
         finally:
             with self._lock:
                 self._live.pop(analysis_id, None)
 
+    def _fail(self, analysis_id: str, exc: Exception) -> None:
+        if isinstance(exc, Interrupted) or self._stopping.is_set():
+            # shutting down: MediaPipe's own worker pool refuses work during interpreter shutdown, so
+            # whatever failed here failed because of the restart, not the clip
+            log.info("analysis %s interrupted by shutdown (%s)", analysis_id, type(exc).__name__)
+            self._write_meta(analysis_id, status="failed", stage="Interrupted", error=INTERRUPTED, finished_utc=now())
+            return
+        if isinstance(exc, AnalysisError):
+            log.info("analysis %s failed: %s", analysis_id, exc)
+            self._write_meta(analysis_id, status="failed", stage="Failed", error=str(exc), finished_utc=now())
+            return
+        log.error("analysis %s crashed:\n%s", analysis_id, "".join(traceback.format_exception(exc)))
+        self._write_meta(analysis_id, status="failed", stage="Failed", finished_utc=now(),
+                         error=f"Internal error ({type(exc).__name__}: {exc}). See the server log.")
+
+    def start(self) -> None:
+        """Server start: accept work again (a previous shutdown in this process set the stop flag)."""
+        self._stopping.clear()
+        self.recover()
+
     def shutdown(self) -> None:
+        self._stopping.set()
         with self._lock:
             executor, self._executor = self._executor, None
         if executor is not None:

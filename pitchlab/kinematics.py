@@ -11,10 +11,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .signals import derivative, unwrap_deg
+from .signals import derivative, fill_gaps, unwrap_deg
 from .skeleton import J, leg_length
 
 Z = np.array([0.0, 0.0, 1.0])
+RELEASE_BRIDGE_S = 0.25
 
 
 TRACK_KEYS = ("l_ankle", "r_ankle", "l_knee", "mid_hip", "t_wrist", "t_shoulder")
@@ -142,7 +143,13 @@ def kinematics(m: Motion) -> dict[str, np.ndarray]:
     # Release is found from the wrist as the camera sees it (relative to the pelvis): MediaPipe's
     # per-frame depth estimate for a fast-moving wrist jumps by tens of centimetres, which made the
     # 3D speed peak during arm cocking instead of at release on real clips.
-    wrist_speed = np.linalg.norm(derivative(m.track["t_wrist"] - m.track["mid_hip"], t), axis=-1) / s
+    hand = m.track["t_wrist"] - m.track["mid_hip"]
+    wrist_speed = np.linalg.norm(derivative(hand, t), axis=-1) / s
+    # The same speed with untracked stretches of up to RELEASE_BRIDGE_S bridged: in dim light the arm can
+    # be lost from layback until after release, and then the fastest movement of the clip is the one
+    # across that gap. Used to locate release roughly and to judge whether the pitch was at full speed
+    # (the straight line across a gap is a lower bound of the real speed); not for display.
+    wrist_speed_bridged = np.linalg.norm(derivative(fill_gaps(hand, t, RELEASE_BRIDGE_S), t), axis=-1) / s
     foot_pos = m.track["l_ankle"] / s
     foot_speed = np.linalg.norm(derivative(foot_pos, t), axis=-1)
     knee_height = (m.track["l_knee"] @ m.track_up) / s
@@ -165,6 +172,7 @@ def kinematics(m: Motion) -> dict[str, np.ndarray]:
         "shoulder_ir_velo": -derivative(shoulder_er, t),
         "arm_slot": arm_slot,
         "wrist_speed": wrist_speed,
+        "wrist_speed_bridged": wrist_speed_bridged,
         "foot_speed": foot_speed,
         "foot_pos": foot_pos,
         "knee_height": knee_height,
@@ -173,5 +181,10 @@ def kinematics(m: Motion) -> dict[str, np.ndarray]:
         out["pelvis_fwd_velo"] = derivative(m.track["mid_hip"] @ m.track_forward, t) / s
         # how far the throwing hand is in front of the throwing shoulder, toward home (leg lengths)
         out["hand_ahead"] = ((m.track["t_wrist"] - m.track["t_shoulder"]) @ m.track_forward) / s
+        # lead heel and toe (video only - the lab data has no foot markers), for the foot's touch-down
+        for name, key in (("heel", "l_heel"), ("toe", "l_toe")):
+            if key in m.track:
+                out[f"{name}_pos"] = m.track[key] / s
+                out[f"{name}_speed"] = np.linalg.norm(derivative(out[f"{name}_pos"], t), axis=-1)
     out["arm_valid"] = m.arm_valid if m.arm_valid is not None else np.ones(len(t), dtype=bool)
     return out

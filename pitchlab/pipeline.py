@@ -15,13 +15,13 @@ import numpy as np
 from . import __version__
 from .coaching import findings, rules_report
 from .config import ANALYSIS_MAX_SIDE, MAX_FRAMES, RENDER_MAX_SIDE
-from .events import Events, calib_for_view, detect_events, validate_order
+from .events import Events, calib_for_view, detect_events, release_hand_speed, validate_order
 from .kinematics import kinematics
 from .metrics import METRIC_BY_KEY, METRIC_KEYS, arm_untracked, compute_metrics, normalise_er
 from .model import predict
 from .pose import MODEL_VARIANTS, PoseTrack, estimate
 from .preprocess import Prepared, PreprocessError, prepare
-from .reference import Reference, get_reference, velocity_band
+from .reference import Reference, fps_bucket, get_reference, velocity_band
 from .render import render_keyframes, render_overlay
 from .video_io import VideoError, iter_frames, open_readable
 
@@ -186,6 +186,45 @@ def _quality_warnings(prep: Prepared, ev: Events, ref: Reference) -> list[str]:
     return w
 
 
+# A real pitch's peak hand speed, relative to the Driveline median for the same view and frame rate. Below
+# FAIL the clip has no release in it or is slow-motion played at its playback rate (all timing 4-8x off);
+# below FAIL_NO_FP the same when foot plant could not be found either (a good sign the delivery is missing).
+RELEASE_SPEED_FAIL = 0.3
+RELEASE_SPEED_FAIL_NO_FP = 0.5
+RELEASE_SPEED_WARN = 0.5
+
+
+def release_check(prep: Prepared, kin: dict, ev: Events, ref: Reference) -> dict:
+    t = prep.motion.t
+    # bridged speed: when the arm is blurred out of tracking around release, the straight line across the
+    # gap is the only (lower-bound) measure of the hand speed
+    peak = release_hand_speed(t, kin.get("wrist_speed_bridged", kin["wrist_speed"]), ev.br)
+    if ev.source.get("br") == "estimated":
+        # release was extrapolated across a blur gap: the blur itself shows a fast arm (a slow-motion clip
+        # is sharp), and the hand speed through release was never measured, so it is not judged
+        return {"peak": peak, "typical": None, "ratio": None, "fail": False, "warn": False,
+                "skipped": "release extrapolated across untracked frames"}
+    table = ref.calibration.get("release_hand_speed") or {}
+    bucket = fps_bucket(prep.quality["fps_effective"])
+    view = "side" if prep.camera_view == "side" else "behind"
+    if ev.source.get("fp") == "estimated":
+        # the camera view comes from the stride at foot plant, so without a foot plant it is a guess:
+        # compare with the faster (side-on) reference rather than let a wrong "behind" lower the bar
+        view = max(table, key=lambda v: table[v].get(bucket, {}).get("median", 0.0), default=view)
+    typical = table.get(view, {}).get(bucket, {}).get("median")
+    ratio = peak / typical if typical and np.isfinite(peak) else None
+    fail = ratio is not None and (ratio < RELEASE_SPEED_FAIL or (ratio < RELEASE_SPEED_FAIL_NO_FP and ev.source.get("fp") == "estimated"))
+    return {"peak": peak, "typical": typical, "ratio": ratio, "fail": fail,
+            "warn": ratio is not None and ratio < RELEASE_SPEED_WARN}
+
+
+def release_failure_message(chk: dict) -> str:
+    return (f"Couldn't find a full-speed pitch in this clip: the throwing hand peaks at {chk['peak']:.1f} leg lengths "
+            f"per second, while pitchers in the Driveline data reach about {chk['typical']:.0f}. Either the clip does "
+            "not include the release, or it is a slow-motion video that plays slowed down - then upload it again "
+            "with Capture frame rate set to the rate it was filmed at (usually 120 or 240).")
+
+
 def assemble(prep: Prepared, ev: Events, ref: Reference, opts: Options, video: dict) -> dict:
     kin = kinematics(prep.motion)
     raw = compute_metrics(prep.motion, kin, ev, ref.height_per_leg_length)
@@ -209,6 +248,12 @@ def assemble(prep: Prepared, ev: Events, ref: Reference, opts: Options, video: d
     metrics = ref.compare(raw, fps, unavailable=_unavailable_reasons(prep, ev), velo_mph=velo_for_band, level=level)
 
     warnings = _quality_warnings(prep, ev, ref)
+    chk = release_check(prep, kin, ev, ref)
+    if chk["warn"]:
+        warnings.append(f"The throwing hand moves slower than any pitcher in the Driveline reference "
+                        f"({chk['peak']:.1f} vs a typical {chk['typical']:.0f} leg lengths/s). If this is a slow-motion "
+                        "clip that plays slowed down, re-run it with the capture frame rate; otherwise read the results "
+                        "with caution.")
     torso_br = kin["torso_rot"][ev.br]
     if np.isfinite(torso_br) and not (20.0 <= torso_br <= 220.0):
         warnings.append("At release the trunk does not face home in the reconstructed 3D pose; trunk "
@@ -227,7 +272,7 @@ def assemble(prep: Prepared, ev: Events, ref: Reference, opts: Options, video: d
                     "height_cm": opts.height_cm, "weight_kg": opts.weight_kg, "level": opts.level,
                     "radar_velocity_mph": opts.velocity_mph},
         "video": video | {"fps_effective": fps, "samples": int(len(t)), "capture_fps_override": opts.capture_fps},
-        "quality": prep.quality | {"warnings": warnings, "heading_known": prep.heading_known},
+        "quality": prep.quality | {"warnings": warnings, "heading_known": prep.heading_known, "release_check": chk},
         "events": events,
         "event_summary": {k: round(v["ms_from_release"]) for k, v in events.items() if v and k != "br"},
         "metrics": metrics,
@@ -235,6 +280,9 @@ def assemble(prep: Prepared, ev: Events, ref: Reference, opts: Options, video: d
             "velocity_mph": velo_for_band, "source": band_source, "band": velocity_band(velo_for_band)},
         "predictions": predictions,
         "series": _series(prep, kin, ev),
+        # ms from release for every analysed sample: exact on variable-frame-rate clips, where
+        # "sample / fps" is not
+        "timeline_ms": [round(float(x), 1) for x in (t - t[ev.br]) * 1000.0],
     }
     result["findings"] = findings(metrics)
     result["report"] = {"source": "rules", "text": rules_report(result)}
@@ -293,6 +341,8 @@ def run(analysis_dir: Path, opts: Options, input_path: Path,
 
     video = info.as_dict() | {"decoded_path": readable.name, "analysis_size": list(_analysis_size(track))}
     result = assemble(prep, ev, ref, opts, video)
+    if result["quality"]["release_check"]["fail"]:
+        raise AnalysisError(release_failure_message(result["quality"]["release_check"]))
 
     progress(0.8, "Rendering key frames")
     result["keyframes"] = render_keyframes(readable, analysis_dir / "keyframes", prep.frame_index, prep.image_smooth,

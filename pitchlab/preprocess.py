@@ -1,9 +1,9 @@
 """Turn raw MediaPipe output into a `Motion` in the right-hander-normalised lab frame.
 
 Steps: low-visibility masking -> left/right swap repair -> one-frame spike removal -> throwing-arm
-identification -> masking of blurred throwing-arm frames -> gap filling -> smoothing -> provisional
-release / foot-plant detection -> lab frame from the stride at foot plant (camera-square or
-stride-aligned heading) -> mirroring of left-handers.
+identification -> masking of untrustworthy throwing-arm frames (blurred, mirrored body, lone samples)
+-> gap filling -> smoothing -> provisional release / foot-plant detection -> lab frame from the stride
+at foot plant (camera-square or stride-aligned heading) -> mirroring of left-handers.
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from .skeleton import (J, MP, MP_ARM_PAIRS, MP_LEG_PAIRS, leg_length, leg_length
 
 VISIBILITY_MIN = 0.3
 ARM_TRUST_VISIBILITY = 0.7  # throwing elbow/wrist below this are treated as missing (motion blur)
+ARM_FALLBACK_VISIBILITY = 0.5   # ...lowered to this when the arm rarely reaches 0.7 during the delivery
+ARM_TRUSTED_FRACTION_MIN = 0.4  # "rarely": in fewer than this share of the delivery's detected frames
 SWAP_RATIO = 0.5            # swap when the crossed assignment is this much closer to the previous frame
 SWAP_MAX_GAP_FRAMES = 3     # never judge a swap against a reference frame older than this
 MIN_FRAMES = 30
@@ -63,8 +65,9 @@ def _cost(image: np.ndarray, f: int, g: int, pairs) -> tuple[float, float]:
     return float(keep), float(cross)
 
 
-def repair_swaps(image: np.ndarray, world: np.ndarray, vis: np.ndarray) -> dict[str, int]:
+def repair_swaps(image: np.ndarray, world: np.ndarray, vis: np.ndarray) -> dict[str, np.ndarray]:
     """In-place repair of frames where MediaPipe labelled the left limb as the right one and vice versa.
+    Returns, for "legs" and "arms", a per-frame mask of the frames that were swapped.
 
     Each frame is judged only against the previous judged frame, and only if that frame is at most
     SWAP_MAX_GAP_FRAMES old - comparing with a stale frame let one bad decision flip the arms for the
@@ -72,14 +75,14 @@ def repair_swaps(image: np.ndarray, world: np.ndarray, vis: np.ndarray) -> dict[
     tracked (a blurred arm at release gives random positions), and a swap also needs the elbows to
     agree: the throwing hand legitimately sweeps past the glove hand in the follow-through, but MediaPipe
     swaps move the whole arm."""
-    counts = {}
+    swapped = {}
     groups = (
         ("legs", MP_LEG_PAIRS, MP_LEG_PAIRS, 0.0),
         ("arms", MP_ARM_PAIRS, ARM_DECISION_PAIRS, ARM_TRUST_VISIBILITY),
     )
     for name, pairs, decide, min_vis in groups:
         idx = [i for p in decide for i in p]
-        n_swaps = 0
+        mask = np.zeros(len(image), dtype=bool)
         prev = None
         for f in range(len(image)):
             if not np.isfinite(image[f, idx]).all() or (min_vis and vis[f, idx].min() < min_vis):
@@ -93,10 +96,36 @@ def repair_swaps(image: np.ndarray, world: np.ndarray, vis: np.ndarray) -> dict[
                 if swap:
                     for arr in (image, world, vis):
                         _swap_pairs(arr, f, pairs)
-                    n_swaps += 1
+                    mask[f] = True
             prev = f
-        counts[name] = n_swaps
-    return counts
+        swapped[name] = mask
+    return swapped
+
+
+def trusted_arm_frames(conf: np.ndarray, finite: np.ndarray, legs_swapped: np.ndarray,
+                       detected: np.ndarray, delivery: np.ndarray) -> tuple[np.ndarray, float]:
+    """Frames whose throwing elbow and wrist positions can be trusted, and the confidence threshold used.
+
+    - Confidence (the lower of elbow and wrist) must reach ARM_TRUST_VISIBILITY: a blurred arm gets
+      low confidence and random positions. If the arm reaches it in fewer than ARM_TRUSTED_FRACTION_MIN
+      of the delivery's pose-detected frames (dim light, dark clothes), ARM_FALLBACK_VISIBILITY is used
+      instead - the worst frames, the blurred ones, are still dropped. Frames where the whole pose was
+      lost say nothing about the arm and are left out of that count.
+    - Frames on which the legs had to be swapped back are dropped: MediaPipe then mirrored the whole
+      body (it confuses the pitcher's front and back as the trunk turns), and the arm labels cannot be
+      repaired the same way - the glove arm is hidden, and the throwing-wrist label sits on the glove
+      hand with high confidence.
+    - A lone confident frame between low-confidence ones is dropped: in a blurred stretch MediaPipe now
+      and then places the wrist on the glove or the torso with high confidence for a single frame. (Only
+      blur makes a frame lone: a good frame between a mirrored stretch and the release blur is kept.)"""
+    judged = delivery & detected
+    threshold = ARM_TRUST_VISIBILITY
+    if judged.any() and np.mean(conf[judged] >= ARM_TRUST_VISIBILITY) < ARM_TRUSTED_FRACTION_MIN:
+        threshold = ARM_FALLBACK_VISIBILITY
+    ok = (conf >= threshold) & finite
+    lone = ok[1:-1] & ~ok[:-2] & ~ok[2:]
+    ok[1:-1][lone] = False
+    return ok & ~legs_swapped, threshold
 
 
 def median3(x: np.ndarray) -> np.ndarray:
@@ -174,21 +203,20 @@ def prepare(track: PoseTrack, throws: str = "auto", alignment: str = "square",
                          "(the pose model may have mirrored the body). The faster arm was analysed as the "
                          "throwing arm.")
 
-    # Blurred throwing arm (low landmark confidence, typically the frames around release at 60 fps):
-    # its positions are guesses, so treat them as missing and bridge them instead.
+    # Throwing-arm frames whose positions are guesses (blur around release at 60 fps, a mirrored body)
+    # are treated as missing and bridged instead. "Low confidence throughout" is judged over the
+    # delivery only (0.6 s either side of the arm's peak speed): during the windup the arm is often
+    # hidden behind the body, which is expected.
     side = "r" if used == "R" else "l"
     arm_idx = [MP[f"{side}_elbow"], MP[f"{side}_wrist"]]
-    arm_valid = (track.visibility[:, arm_idx].min(axis=1) >= ARM_TRUST_VISIBILITY) & np.isfinite(image[:, arm_idx]).all(axis=(1, 2))
-    # judge "consistently low confidence" over the delivery only (0.6 s either side of the arm's peak
-    # speed): during the windup the arm is often hidden behind the body, which is expected
     w_speed = np.linalg.norm(np.gradient(image[:, MP[f"{side}_wrist"]] - img_hip, t, axis=0), axis=-1)
     peak_t = t[int(np.nanargmax(w_speed))] if np.isfinite(w_speed).any() else t[len(t) // 2]
-    delivery = np.abs(t - peak_t) <= 0.6
-    if arm_valid[delivery].mean() < 0.5:
-        # consistently low confidence for this camera/subject: fall back to the general threshold
-        arm_valid = np.isfinite(image[:, arm_idx]).all(axis=(1, 2))
-        notes.append("The throwing arm was tracked with low confidence throughout the clip; arm metrics "
-                     "may be unreliable.")
+    arm_valid, arm_threshold = trusted_arm_frames(
+        track.visibility[:, arm_idx].min(axis=1), np.isfinite(image[:, arm_idx]).all(axis=(1, 2)),
+        swaps["legs"], track.detected, np.abs(t - peak_t) <= 0.6)
+    if arm_threshold < ARM_TRUST_VISIBILITY:
+        notes.append("The throwing arm was tracked with low confidence through most of the delivery (dim "
+                     "light or dark clothing?); arm metrics may be unreliable.")
     hand = [i for i in range(13, 23) if (i % 2 == 1) == (side == "l")] + arm_idx
     image[np.ix_(~arm_valid, hand)] = np.nan
     world[np.ix_(~arm_valid, hand)] = np.nan
@@ -206,10 +234,13 @@ def prepare(track: PoseTrack, throws: str = "auto", alignment: str = "square",
     pos_up = smooth_skeleton(pos_cam @ CAM_TO_UP.T, fps)
 
     img_c = {nm: image[:, i] for nm, i in zip(names, idx)}
+    lead = "l" if used == "R" else "r"          # the glove-side leg strides
     img_track = {
         "l_ankle": img_c["l_ankle"], "r_ankle": img_c["r_ankle"], "l_knee": img_c["l_knee"],
         "mid_hip": (img_c["r_hip"] + img_c["l_hip"]) / 2.0,
         "t_wrist": img_c["t_wrist"], "t_shoulder": img_c["t_shoulder"],
+        # lead heel and toe: points on the foot itself, for the moment it touches down
+        "l_heel": image[:, MP[f"{lead}_heel"]], "l_toe": image[:, MP[f"{lead}_foot"]],
     }
     img_track = {k: lowpass(v, fps, CUTOFF_ARM_HZ if k == "t_wrist" else CUTOFF_BODY_HZ) for k, v in img_track.items()}
     scale_px = _leg_length_px(img_c)
@@ -219,7 +250,7 @@ def prepare(track: PoseTrack, throws: str = "auto", alignment: str = "square",
     prov = Motion(t=t, pos=pos_up, track=img_track, track_up=img_up, track_forward=None,
                   track_scale=scale_px, heading_known=False, fps=fps, arm_valid=arm_valid)
     kin0 = kinematics(prov)
-    br, _ = detect_br(t, kin0["wrist_speed"], calib)
+    br, _ = detect_br(t, kin0["wrist_speed_bridged"], calib)
     fp = detect_fp(t, kin0["foot_speed"], kin0["foot_pos"], br, detect_pkh(t, kin0["knee_height"], br), calib)
     if fp is None:
         fp = int(np.argmin(np.abs(t - (t[br] - calib["fp_to_br_median_s"]))))
@@ -272,7 +303,8 @@ def prepare(track: PoseTrack, throws: str = "auto", alignment: str = "square",
         "pose_detected_fraction": float(track.detected.mean()),
         "pose_detected_fraction_window": float(track.detected[win].mean()) if win.any() else 0.0,
         "key_joint_visibility_window": float(np.nanmean(key_vis[win])) if win.any() else 0.0,
-        "swaps_repaired": swaps,
+        "swaps_repaired": {k: int(v.sum()) for k, v in swaps.items()},
+        "arm_trust_visibility": arm_threshold,
         "arm_untracked_frames_window": int((~arm_valid[win]).sum()),
         "camera_view": view,
         "leg_length_px": scale_px,

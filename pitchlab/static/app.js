@@ -322,7 +322,7 @@ function renderDone(root, meta, r) {
   const id = meta.id;
   const fpsEff = r.video.fps_effective;
   const brSample = r.events.br.sample;
-  const msOf = k => ((k - brSample) / fpsEff) * 1000;
+  const msOf = k => (r.timeline_ms && r.timeline_ms[k] !== undefined) ? r.timeline_ms[k] : ((k - brSample) / fpsEff) * 1000;
 
   // ---- video + events
   const video = el("video", { src: `/api/analyses/${id}/overlay.mp4`, controls: true, playsInline: true, muted: true, preload: "auto" });
@@ -351,7 +351,7 @@ function renderDone(root, meta, r) {
     el("button", { class: "secondary", title: "Next frame (.)", text: "frame ▶", onclick: () => seek(current() + 1) }),
     speed, readout);
   const keyHandler = e => {
-    if (e.target.matches("input, select, textarea")) return;
+    if (e.target instanceof Element && e.target.matches("input, select, textarea")) return;
     if (e.key === ",") { seek(current() - 1); e.preventDefault(); }
     if (e.key === ".") { seek(current() + 1); e.preventDefault(); }
   };
@@ -620,12 +620,13 @@ function qualityDetails(r) {
 }
 
 function downloadCsv(s, r, meta) {
-  const keys = ["sample", "t_ms", ...Object.keys(s).filter(k => k !== "sample" && k !== "t_ms")];
-  const lines = [keys.join(",")];
-  for (let i = 0; i < s.t_ms.length; i++) lines.push(keys.map(k => s[k][i] ?? "").join(","));
+  // frame numbers match the page (counted from 1, same as the video readout and the event table)
+  const keys = Object.keys(s).filter(k => k !== "sample" && k !== "t_ms");
+  const lines = [["frame", "t_ms", ...keys].join(",")];
+  for (let i = 0; i < s.t_ms.length; i++) lines.push([s.sample[i] + 1, s.t_ms[i], ...keys.map(k => s[k][i] ?? "")].join(","));
   lines.push("");
-  lines.push("event,sample,ms_from_release,source");
-  for (const [k, v] of Object.entries(r.events)) if (v) lines.push([k, v.sample, v.ms_from_release.toFixed(1), v.source].join(","));
+  lines.push("event,frame,ms_from_release,source");
+  for (const [k, v] of Object.entries(r.events)) if (v) lines.push([k, v.sample + 1, v.ms_from_release.toFixed(1), v.source].join(","));
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
   const a = el("a", { href: URL.createObjectURL(blob), download: `${(meta.options?.label || meta.filename).replace(/[^\w.-]+/g, "_")}_series.csv` });
   document.body.append(a);

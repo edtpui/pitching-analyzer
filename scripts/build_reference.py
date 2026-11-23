@@ -34,7 +34,8 @@ from pitchlab.config import REFERENCE_DIR  # noqa: E402
 from pitchlab.driveline import (Trial, arm_dropout_p, clean_motion, load_trials, side_leg_length_m,  # noqa: E402
                                 simulate_video, true_event_indices)
 from pitchlab.driveline import ARM_DROPOUT_P  # noqa: E402
-from pitchlab.events import DEFAULT_CALIBRATION, Events, calib_for_view, detect_br, detect_events, detect_fp, detect_pkh  # noqa: E402
+from pitchlab.events import (DEFAULT_CALIBRATION, Events, calib_for_view, detect_br, detect_events,  # noqa: E402
+                             detect_fp, detect_pkh, release_hand_speed)
 from pitchlab.kinematics import kinematics  # noqa: E402
 from pitchlab.metrics import METRIC_KEYS, METRICS, compute_metrics, metric_definitions  # noqa: E402
 from pitchlab.model import BODY_FEATURES, FEATURES, TARGETS, train  # noqa: E402
@@ -69,6 +70,42 @@ def metrics_frame(rows: dict[str, dict]) -> pd.DataFrame:
     return pd.DataFrame.from_dict(rows, orient="index").reindex(columns=list(METRIC_KEYS)).astype(float)
 
 
+def last_up_crossing(t: np.ndarray, x: np.ndarray, level: float, i_end: int, t_min: float) -> float | None:
+    """Time of the last upward crossing of `level` by `x` between t_min and sample i_end (interpolated)."""
+    for k in range(min(i_end, len(t) - 1) - 1, -1, -1):
+        if t[k] < t_min:
+            return None
+        a, b = x[k], x[k + 1]
+        if np.isfinite(a) and np.isfinite(b) and a < level <= b:
+            return float(t[k] + (level - a) / (b - a) * (t[k + 1] - t[k]))
+    return None
+
+
+def hand_path_table(sims: dict, kins: dict, br_true: dict, br_hand_ahead: float) -> dict:
+    """Median time from the hand's last pass of each hand-ahead level to Driveline's release (side-on),
+    for extrapolating release across a blur gap. The table starts at the end of the layback: the lowest
+    level that at least 90% of pitches pass within 0.3 s before release with an interquartile spread of
+    at most 20 ms. Below it pitchers hold the layback for very different times."""
+    levels = [float(v) for v in np.round(np.arange(-0.6, br_hand_ahead - 1e-9, 0.05), 3)] + [br_hand_ahead]
+    rows = []
+    for lv in levels:
+        dts = []
+        for sp, m in sims.items():
+            ibr = int(np.argmin(np.abs(m.t - br_true[sp])))
+            tc = last_up_crossing(m.t, kins[sp]["hand_ahead"], lv, ibr + 2, br_true[sp] - 0.3)
+            if tc is not None:
+                dts.append(br_true[sp] - tc)
+        dts = np.array(dts)
+        coverage = dts.size / len(sims)
+        iqr = float(np.subtract(*np.percentile(dts, [75, 25]))) if dts.size else np.inf
+        rows.append((lv, float(np.median(dts)) if dts.size else np.nan, coverage, iqr))
+    start = next(i for i, (_, _, cov, iqr) in enumerate(rows) if cov >= 0.9 and iqr <= 0.02)
+    kept = rows[start:]
+    dt = np.minimum.accumulate([max(r[1], 0.0) for r in kept])   # never later for a hand further forward
+    return {"levels": [r[0] for r in kept], "dt_s": [float(v) for v in dt],
+            "coverage": [round(r[2], 3) for r in kept], "iqr_s": [round(r[3], 4) for r in kept]}
+
+
 def detected_metrics(tr: Trial, m, calib: dict, ratio: float) -> tuple[dict, Events, dict]:
     kin = kinematics(m)
     ev = detect_events(m.t, kin, calib)
@@ -80,7 +117,10 @@ def main() -> int:
     rng = np.random.default_rng(SEED)
     trials = load_trials()
     print(f"loaded {len(trials)} Driveline pitches from {len({t.user for t in trials})} athletes")
-    truth_ok = {t.session_pitch for t in trials if valid_truth(t)}
+    # in file order: simulations below draw from one seeded generator, and iterating a set (whose order
+    # changes with Python's per-process string hashing) gave every build slightly different numbers
+    truth_order = [t.session_pitch for t in trials if valid_truth(t)]
+    truth_ok = set(truth_order)
     print(f"{len(truth_ok)} pitches have usable force-plate/ball events")
 
     # height per image-plane leg length, exactly as the video pipeline measures it (side-on)
@@ -117,18 +157,22 @@ def main() -> int:
 
     # 2. calibrate the detectors on simulated 240 fps video (no arm blur: calibration needs clean timing)
     by_sp = {t.session_pitch: t for t in trials}
-    clean240 = {sp: simulate_video(by_sp[sp], 240, NOMINAL_NOISE, rng) for sp in truth_ok}
+    clean240 = {sp: simulate_video(by_sp[sp], 240, NOMINAL_NOISE, rng) for sp in truth_order}
     kin_clean = {sp: kinematics(m) for sp, m in clean240.items()}
-    behind240 = {sp: simulate_video(by_sp[sp], 240, NOMINAL_NOISE, rng, view="behind") for sp in truth_ok}
+    behind240 = {sp: simulate_video(by_sp[sp], 240, NOMINAL_NOISE, rng, view="behind") for sp in truth_order}
     kin_behind = {sp: kinematics(m) for sp, m in behind240.items()}
     true_ix = lambda sp, m, k: int(np.argmin(np.abs(m.t - by_sp[sp].events_s[k])))
 
     # release, side-on: how far the hand is in front of the shoulder at Driveline's release
     br_hand_ahead = float(np.median([kin_clean[sp]["hand_ahead"][true_ix(sp, m, "br")] for sp, m in clean240.items()]))
+    # ...and the hand's typical path to that point, for release across a blur gap too long to bridge
+    br_hand_path = hand_path_table(clean240, kin_clean, {sp: by_sp[sp].events_s["br"] for sp in clean240}, br_hand_ahead)
+    print("hand path to release (level: ms):",
+          {lv: round(dt * 1000, 1) for lv, dt in zip(br_hand_path["levels"], br_hand_path["dt_s"])})
     # release, other views: peak wrist speed + offset
     offsets = []
     for sp, m in behind240.items():
-        _, peak = detect_br(m.t, kin_behind[sp]["wrist_speed"], {"br_offset_s": 0.0})
+        _, peak = detect_br(m.t, kin_behind[sp]["wrist_speed_bridged"], {"br_offset_s": 0.0})
         offsets.append(by_sp[sp].events_s["br"] - m.t[peak])
     br_offset = float(np.median(offsets))
 
@@ -156,43 +200,50 @@ def main() -> int:
     # side-on, the final foot plant is found against the (accurate) hand-crossing release
     fp_frac, fp_radius = best_fp_params(clean240, kin_clean, lambda sp, m, kin: true_ix(sp, m, "br"))
     fp_frac_behind, fp_radius_behind = best_fp_params(
-        behind240, kin_behind, lambda sp, m, kin: detect_br(m.t, kin["wrist_speed"], {"br_offset_s": br_offset})[0])
+        behind240, kin_behind, lambda sp, m, kin: detect_br(m.t, kin["wrist_speed_bridged"], {"br_offset_s": br_offset})[0])
 
     # residual offset of the hand-crossing release with the full detector chain
     base = {**DEFAULT_CALIBRATION, "br_offset_s": br_offset, "fp_speed_fraction": fp_frac, "fp_plant_radius": fp_radius,
-            "br_hand_ahead": br_hand_ahead, "br_hand_offset_s": 0.0}
+            "br_hand_ahead": br_hand_ahead, "br_hand_offset_s": 0.0, "br_hand_path": br_hand_path}
     resid = [by_sp[sp].events_s["br"] - m.t[detect_events(m.t, kin_clean[sp], base).br] for sp, m in clean240.items()]
     br_hand_offset = float(np.median(resid))
     sims240 = {tr.session_pitch: simulate_video(tr, 240, NOMINAL_NOISE, rng, dropout_p=arm_dropout_p(240)) for tr in trials}
-    true_fp_br = [by_sp[s].events_s["br"] - by_sp[s].events_s["fp"] for s in truth_ok]
-    true_mer_br = [by_sp[s].events_s["br"] - by_sp[s].events_s["mer"] for s in truth_ok]
+    true_fp_br = [by_sp[s].events_s["br"] - by_sp[s].events_s["fp"] for s in truth_order]
+    # first contact (10% body weight) to foot plant (100%): video finds the touch-down from heel and toe
+    true_fc_fp = [by_sp[s].events_s["fp"] - by_sp[s].events_s["fc10"] for s in truth_order
+                  if np.isfinite(by_sp[s].events_s.get("fc10", np.nan))]
+    true_mer_br = [by_sp[s].events_s["br"] - by_sp[s].events_s["mer"] for s in truth_order]
     calib = {
         **DEFAULT_CALIBRATION,
         "br_offset_s": br_offset,
         "br_hand_ahead": br_hand_ahead,
         "br_hand_offset_s": br_hand_offset,
+        "br_hand_path": br_hand_path,
         "fp_speed_fraction": fp_frac,
         "fp_plant_radius": fp_radius,
         "fp_speed_fraction_behind": fp_frac_behind,
         "fp_plant_radius_behind": fp_radius_behind,
         "fp_to_br_median_s": float(np.median(true_fp_br)),
+        "fc_to_fp_median_s": float(np.median(true_fc_fp)),
         "fp_to_br_p05_s": float(np.percentile(true_fp_br, 5)),
         "fp_to_br_p95_s": float(np.percentile(true_fp_br, 95)),
         "mer_to_br_median_s": float(np.median(true_mer_br)),
         "height_per_leg_length": ratio,
     }
-    print("calibration:", {k: round(v, 4) for k, v in calib.items()})
+    print("calibration:", {k: round(v, 4) for k, v in calib.items() if isinstance(v, float)})
 
     # 3. event errors + reliability per frame rate
     event_error: dict[str, dict] = {}
     reliability: dict[str, dict] = {str(f): {} for f in FPS_BUCKETS}
     detected_by_fps: dict[int, pd.DataFrame] = {}
+    hand_speed: dict[str, dict[str, list]] = {"side": {}, "behind": {}}
     for fps in FPS_BUCKETS:
         rows, errs = {}, {k: [] for k in ("pkh", "fp", "mer", "br")}
         for tr in trials:
             m = sims240[tr.session_pitch] if fps == 240 else simulate_video(tr, fps, NOMINAL_NOISE, rng, dropout_p=arm_dropout_p(fps))
-            met, ev, _ = detected_metrics(tr, m, calib, ratio)
+            met, ev, kin = detected_metrics(tr, m, calib, ratio)
             rows[tr.session_pitch] = met
+            hand_speed["side"].setdefault(str(fps), []).append(release_hand_speed(m.t, kin["wrist_speed_bridged"], ev.br))
             if tr.session_pitch in truth_ok:
                 for k in errs:
                     v = getattr(ev, k)
@@ -215,6 +266,19 @@ def main() -> int:
                 "bias": float(np.median(a[ok] - b[ok])) if ok.sum() else None,
             }
         print(f"{fps} fps events:", {k: round(v["mae_ms"], 1) for k, v in event_error[str(fps)].items()})
+
+    # typical release hand speed per view and frame rate: the live plausibility check compares a clip to it
+    for fps in FPS_BUCKETS:
+        cal_b = calib_for_view(calib, "behind")
+        for tr in trials[::2]:
+            m = simulate_video(tr, fps, NOMINAL_NOISE, rng, view="behind", dropout_p=arm_dropout_p(fps))
+            kin = kinematics(m)
+            ev = detect_events(m.t, kin, cal_b)
+            hand_speed["behind"].setdefault(str(fps), []).append(release_hand_speed(m.t, kin["wrist_speed_bridged"], ev.br))
+    calib["release_hand_speed"] = {
+        view: {f: {"median": float(np.nanmedian(v)), "p01": float(np.nanpercentile(v, 1)), "n": len(v)} for f, v in d.items()}
+        for view, d in hand_speed.items()}
+    print("release hand speed medians:", {v: {f: round(x["median"], 1) for f, x in d.items()} for v, d in calib["release_hand_speed"].items()})
 
     def rating(key: str, fps: int) -> str:
         rr = reliability[str(fps)][key]["r"]

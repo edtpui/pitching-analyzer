@@ -70,7 +70,9 @@ def transcode_for_decoding(src: Path, dst: Path) -> Path:
            "-fps_mode", "passthrough", "-an", str(dst)]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     if proc.returncode != 0 or not dst.exists():
-        raise VideoError(f"ffmpeg could not decode the file: {proc.stderr.strip()[-400:]}")
+        log.warning("ffmpeg could not decode %s: %s", src.name, proc.stderr.strip()[-800:])
+        raise VideoError("the file may be incomplete (cut off while copying or uploading) or not a video at all. "
+                         "Export or copy it from your phone again and re-upload.")
     return dst
 
 

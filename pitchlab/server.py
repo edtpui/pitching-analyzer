@@ -35,7 +35,7 @@ jobs = Jobs(ANALYSES_DIR)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    jobs.recover()
+    jobs.start()
     try:
         get_reference()
     except ReferenceMissing as exc:
@@ -206,6 +206,7 @@ def edit_events(analysis_id: str, body: EventEdit) -> dict:
                                        body.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
+    jobs.update_summary(analysis_id, result)
     return {"meta": jobs.meta(analysis_id), "result": result}
 
 
