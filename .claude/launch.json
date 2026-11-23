@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pitching-analyzer",
+      "runtimeExecutable": "C:\\AI\\Workspace\\pitching_analyzer\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "pitchlab.server"],
+      "port": 8091
+    }
+  ]
+}

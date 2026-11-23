@@ -1,0 +1,9 @@
+.venv
+.env
+.claude
+.pytest_cache
+**/__pycache__
+data
+assets/driveline
+assets/reference/reference_metrics.csv
+assets/reference/build.log

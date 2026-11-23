@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+# downloaded third-party data and models (re-create with scripts/fetch_assets.py)
+assets/driveline/
+assets/models/
+# built from the Driveline data (re-create with scripts/build_reference.py)
+assets/reference/
+# user uploads and analysis outputs
+data/

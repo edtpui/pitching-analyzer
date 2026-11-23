@@ -1,0 +1,25 @@
+name: pitching-analyzer
+
+services:
+  pitching-analyzer:
+    build:
+      context: .
+      target: app
+    image: pitching-analyzer:0.1.0
+    container_name: pitching-analyzer
+    restart: unless-stopped
+    # Localhost only. Tailnet devices reach it through `tailscale serve` on this PC (see README);
+    # nothing is published on the LAN or the internet.
+    ports:
+      - "127.0.0.1:${PITCHLAB_HOST_PORT:-3202}:8000"
+    environment:
+      PITCHLAB_PASSWORD: ${PITCHLAB_PASSWORD:-}          # optional HTTP Basic auth
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}          # optional Claude reports
+      PITCHLAB_LLM_MODEL: ${PITCHLAB_LLM_MODEL:-claude-opus-5-5}
+      PITCHLAB_MAX_UPLOAD_MB: ${PITCHLAB_MAX_UPLOAD_MB:-600}
+      PITCHLAB_MAX_FRAMES: ${PITCHLAB_MAX_FRAMES:-4000}
+    volumes:
+      - pitchlab_data:/data
+
+volumes:
+  pitchlab_data:
