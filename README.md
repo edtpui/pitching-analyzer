@@ -34,7 +34,7 @@ docker compose up -d --build                      # container "pitching-analyzer
 tailscale serve --bg --https=8444 http://127.0.0.1:3202   # once; persists across reboots
 ```
 
-Tailnet devices then use `https://alienware.tailbfde2b.ts.net:8444`. The container listens on
+Tailnet devices then use `https://<your-machine>.<your-tailnet>.ts.net:8444`. The container listens on
 localhost only; it is not on the LAN and there is no Funnel. Analyses live in the `pitchlab_data`
 volume, separate from the local `data\` folder used by `run.ps1`. Optional settings go in `.env`
 (`PITCHLAB_PASSWORD` turns on a login prompt, `ANTHROPIC_API_KEY` enables Claude reports). Run
