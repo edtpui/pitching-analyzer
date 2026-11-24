@@ -33,6 +33,8 @@ class CalibrationBody(BaseModel):
     rubber_px: list[list[float]] | None = None
     image: str | int = "background"
     camera_height_ft: float | None = Field(default=None, ge=0.5, le=30)
+    camera_ahead_ft: float | None = Field(default=None, ge=-30, le=70)    # tape: ahead of the rubber, toward home
+    camera_side_ft: float | None = Field(default=None, ge=-30, le=30)     # tape: + first-base side, - third-base side
     distance_ft: float | None = Field(default=None, ge=30, le=70)
     mound_in: float | None = Field(default=None, ge=0, le=18)
     copy_from: str | None = None
@@ -156,10 +158,11 @@ def make_router(jobs: FlightJobs) -> APIRouter:
                 raise HTTPException(404, "the analysis to copy from was not found") from None
             if not src.exists():
                 raise HTTPException(422, "that analysis has no calibration")
-            payload = read_json(src) | {k: v for k, v in payload.items() if k in ("camera_height_ft",) and v is not None}
+            payload = read_json(src) | {k: v for k, v in payload.items()
+                                        if k in ("camera_height_ft", "camera_ahead_ft", "camera_side_ft") and v is not None}
             payload["image"] = "background"
-        elif not body.plate_px or not body.rubber_px:
-            raise HTTPException(422, "mark all five corners of home plate and both front corners of the rubber")
+        elif not body.plate_px:
+            raise HTTPException(422, "mark all five corners of home plate")
         try:
             return calibrate_flight(d, meta, payload)
         except (CalibrationError, FlightError, ValueError) as exc:

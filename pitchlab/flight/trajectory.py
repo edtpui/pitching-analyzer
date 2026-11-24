@@ -10,7 +10,10 @@ about the camera centre (every ray is the same), so the scale comes from:
 * drag: the deceleration along the flight is rho*Cd*A/(2m)*v^2, which a scaled copy violates (Cd 0.33,
   given +-18%);
 * when the release is visible as a moving ball, the release distance from the rubber (extension), as a
-  loose prior.
+  loose prior;
+* filmed from behind the release (PitchLab's set-up), where the ball flies straight away from the lens and
+  its far half is too small to size, the catch: the track ends where the ball vanishes into the glove, just
+  behind home plate.
 
 Movement is reported the TrackMan way: from release to the front of home plate, relative to a spinless
 pitch (gravity and drag removed from the fitted acceleration). The spin axis implied by movement and an
@@ -23,7 +26,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import least_squares
 
-from .geometry import FT, G, IN, MPH, PLATE_FRONT_Y, PLATE_HALF_WIDTH, Camera
+from .geometry import FT, G, IN, MPH, PLATE_FRONT_Y, PLATE_HALF_WIDTH, Camera, camera_view
 
 BALL_RADIUS = 1.45 * IN
 BALL_MASS = 0.145
@@ -139,6 +142,7 @@ class Fit:
     cov: np.ndarray | None         # (9, 9) parameter covariance from measurement noise
     extension_prior_used: bool = False
     size_scale: float = 1.0        # fitted systematic size factor (measured / modelled)
+    catch_prior_used: bool = False
     notes: list[str] = field(default_factory=list)
 
 
@@ -154,11 +158,13 @@ def model_diameter(P: np.ndarray, camera: Camera, kind: np.ndarray | int = 0) ->
                     2 * camera.f * BALL_RADIUS * np.sqrt(rho) / z ** 1.5)
 
 
+SMALL_BALL_PX = 10.0             # ball images smaller than this are centred to about 1 px, not the
+SMALL_BALL_SIG_PX = 0.8          # ~0.6 px their edge fit states (measured on synthetic clips): added in quadrature
 HUBER_K = 2.5                    # image / size residuals beyond this many SDs are down-weighted
 
 
 def _residuals(theta, t_ref, t, uv, sig_uv, d, sig_d, use_d, d_minor, cam_R, cam_t, cam_f, cam_c, cam_C, k_drag,
-               t_mid, ext, scale_sigma, w_img, w_size):
+               t_mid, anchors, scale_sigma, w_img, w_size):
     """Measurement residuals carry Huber weights (outlier detections); the physics priors stay quadratic so
     a bad detection cannot buy an impossible deceleration. theta[9] is the log of a size scale shared by
     every frame: the systematic part of the size error (blur, compression, how the ball's edge is judged)
@@ -180,8 +186,7 @@ def _residuals(theta, t_ref, t, uv, sig_uv, d, sig_d, use_d, d_minor, cam_R, cam
     a_par = (a + np.array([0.0, 0.0, G])) @ v_mid / max(s, 1e-6)
     r_drag = (a_par + k_drag * s * s) / (CD_SIGMA_FRAC * k_drag * s * s + 1e-6)
     out = [r_img, r_size, behind, [r_drag, log_k / scale_sigma]]
-    if ext is not None:
-        t_e, y_mean, y_sig = ext
+    for t_e, y_mean, y_sig in anchors:
         y_e = p0[1] + (t_e - t_ref) * v0[1] + 0.5 * (t_e - t_ref) ** 2 * a[1]
         out.append([(y_e - y_mean) / y_sig])
     return np.concatenate(out)
@@ -225,7 +230,8 @@ def initial_guess(track: Track, camera: Camera, setup: Setup) -> Trajectory:
 
 def fit_trajectory(track: Track, camera: Camera, setup: Setup, init: Trajectory | None = None,
                    ext: tuple[float, float, float] | None = None, robust: bool = True,
-                   size_scale_sigma: float = SIZE_SCALE_SIGMA) -> Fit:
+                   size_scale_sigma: float = SIZE_SCALE_SIGMA, catch: tuple[float, float, float] | None = None) -> Fit:
+    """ext and catch: (t, y_mean, y_sigma) priors on where the ball is along the line at time t."""
     if len(track) < 5:
         raise ValueError("at least five ball positions are needed")
     t = track.t
@@ -239,16 +245,19 @@ def fit_trajectory(track: Track, camera: Camera, setup: Setup, init: Trajectory 
     w_img, w_size = np.ones(n), np.ones(n)
     base = (t_ref, t, track.uv, track.sig_uv, d, sig_d, use_d, kind == 1, camera.R, camera.tvec, camera.f,
             np.array([camera.cx, camera.cy]), camera.center, drag_k(setup.altitude_ft), float(0.5 * (t.min() + t.max())),
-            ext, size_scale_sigma)
+            tuple(a for a in (ext, catch) if a is not None), size_scale_sigma)
     theta = np.append(init.theta, 0.0)
+
+    small = ~(np.nan_to_num(d, nan=0.0) >= SMALL_BALL_PX)
+    sig_uv = np.where(small, np.hypot(track.sig_uv, SMALL_BALL_SIG_PX), track.sig_uv)
     for _ in range(4 if robust else 1):
-        sol = least_squares(_residuals, theta, args=base + (w_img, w_size), method="trf", x_scale="jac",
-                            max_nfev=2000)
+        args = base[:3] + (sig_uv,) + base[4:] + (w_img, w_size)
+        sol = least_squares(_residuals, theta, args=args, method="trf", x_scale="jac", max_nfev=2000)
         theta = sol.x
         tr = Trajectory.from_theta(theta, t_ref)
         P = tr.pos(t)
         uvm, _ = camera.project(P)
-        e_img = np.linalg.norm(uvm - track.uv, axis=1) / track.sig_uv
+        e_img = np.linalg.norm(uvm - track.uv, axis=1) / sig_uv
         e_size = np.where(use_d, np.abs(np.exp(theta[9]) * model_diameter(P, camera, kind) - np.nan_to_num(d)) / sig_d,
                           0.0)
         w_img = np.sqrt(np.where(e_img <= HUBER_K, 1.0, HUBER_K / np.maximum(e_img, 1e-9)))
@@ -257,7 +266,7 @@ def fit_trajectory(track: Track, camera: Camera, setup: Setup, init: Trajectory 
     P = traj.pos(t)
     uvm, _ = camera.project(P)
     err = np.linalg.norm(uvm - track.uv, axis=1)
-    inl = err <= np.maximum(4.0 * np.median(err) + 1.0, 3.0 * track.sig_uv)
+    inl = err <= np.maximum(4.0 * np.median(err) + 1.0, 3.0 * sig_uv)
     dm = model_diameter(P, camera, kind)
     size_ratio = float(np.median(d[use_d] / dm[use_d])) if use_d.any() else float("nan")
     cov = None
@@ -270,13 +279,20 @@ def fit_trajectory(track: Track, camera: Camera, setup: Setup, init: Trajectory 
         cov = None
     return Fit(traj=traj, rms_px=float(np.sqrt(np.mean(err[inl] ** 2))) if inl.any() else float("nan"),
                inliers=inl, size_ratio=size_ratio, cov=cov, extension_prior_used=ext is not None,
-               size_scale=float(np.exp(theta[9])))
+               size_scale=float(np.exp(theta[9])), catch_prior_used=catch is not None)
 
 
 RELEASE_WINDOW_FT = 6.0          # first tracked point this close to the expected release = release seen...
 RELEASE_MAX_SIZE_SHIFT = 0.10    # ...unless anchoring there needs the ball sizes off by more than this
 RELEASE_LATE_FRAMES = 2.0        # the ball is first measured clear of the hand about two frames after release
 RELEASE_LATE_SIGMA_FRAMES = 1.2
+
+
+CATCH_Y_FT = -0.5                # where the glove takes the ball: just behind the back tip of the plate...
+CATCH_SIGMA_FT = 1.0             # ...give or take a foot (catcher's set-up, reach)
+CATCH_WINDOW_FT = 5.0            # last tracked point this close to the glove = the ball was followed into it
+CATCH_EDGE_PX = 12.0             # a track ending this close to the picture's edge left the frame instead
+CATCH_MIN_TAIL_FRAMES = 3        # ...and one ending this close to the end of the clip just ran out of video
 
 
 @dataclass
@@ -286,6 +302,7 @@ class PitchFit:
     t_release: float
     y_release_expected: float      # m
     release_source: str = "auto"   # auto (first tracked frame) | manual (set by the user) | estimated (not seen)
+    caught: bool = False           # the catch anchored the far end of the flight
 
     def release_time(self, traj: Trajectory) -> float:
         if self.release_observed:
@@ -297,26 +314,65 @@ class PitchFit:
 MANUAL_RELEASE_SIGMA_FRAMES = 0.7   # a release frame picked by eye
 
 
+def catch_anchor(track: Track, camera: Camera, setup: Setup, traj: Trajectory, check: bool = True,
+                 t_clip_end: float | None = None) -> tuple[float, float, float] | None:
+    """(t, y, sigma) for the last tracked frame if the ball was followed into the catcher's glove. Only for a
+    camera at the release looking down the line (the plate end of the flight is otherwise either sized well
+    enough or hidden behind the catcher). The last sighting is up to one frame before the glove. With check,
+    the track must end inside the picture, before the end of the clip (t_clip_end: the last frame searched;
+    unknown = no catch), and within CATCH_WINDOW_FT of the glove by the unanchored fit, so a ball lost early,
+    leaving the frame or still flying when the video stops is not pinned to the plate."""
+    if camera_view(camera, setup.distance_ft) != "release" or len(track) < 5:
+        return None
+    t_last = float(track.t[-1])
+    dt_frame = float(np.median(np.diff(track.t)))
+    step = float(np.linalg.norm(traj.vel(t_last))) * dt_frame
+    y_mean = CATCH_Y_FT * FT + 0.5 * step
+    if check:
+        if t_clip_end is None or t_clip_end - t_last < CATCH_MIN_TAIL_FRAMES * dt_frame:
+            return None
+        u, v = track.uv[-1]
+        if not (CATCH_EDGE_PX <= u <= camera.width - CATCH_EDGE_PX and CATCH_EDGE_PX <= v <= camera.height - CATCH_EDGE_PX):
+            return None
+        if abs(traj.pos(t_last)[1] - y_mean) > CATCH_WINDOW_FT * FT:
+            return None
+    return t_last, y_mean, float(np.hypot(CATCH_SIGMA_FT * FT, 0.3 * step))
+
+
 def fit_pitch(track: Track, camera: Camera, setup: Setup, init: Trajectory | None = None,
-              observed: bool | None = None, t_release_manual: float | None = None) -> PitchFit:
+              observed: bool | None = None, t_release_manual: float | None = None,
+              caught: bool | None = None, t_clip_end: float | None = None) -> PitchFit:
     """Fit, then decide whether the release was seen: if the first tracked point lies near where pitchers
     release (pitching distance minus extension), the ball was followed out of the hand and the release
     distance becomes a constraint on the scale - the time-of-flight-over-a-known-distance measurement, which
     does not depend on how precisely the camera's focal length was solved or on the ball's apparent size.
     The ball is measured clear of the hand about two frames after it leaves it, so the prior sits that far
-    down the flight. If anchoring there would need the ball sizes off by more than 12%, the track most
-    likely started late and the anchor is dropped. `observed` forces the decision (used to keep it fixed
-    across calibration samples). `t_release_manual`, a release time the user picked, anchors the release
-    there instead."""
+    down the flight. If anchoring there would need the ball sizes off by more than 10%, the track most
+    likely started late and the anchor is dropped. Filmed from behind the release, the end of the track is
+    anchored the same way at the catch (catch_anchor). `observed` and `caught` force the decisions (used to
+    keep them fixed across calibration samples; t_clip_end is the time of the last frame searched). `t_release_manual`, a release time the user picked,
+    anchors the release there instead."""
     y_exp = (setup.distance_ft - setup.extension_prior_ft) * FT
     t_first = float(track.t[0])
     dt_frame = float(np.median(np.diff(track.t))) if len(track) > 1 else 1 / 240.0
     fit0 = fit_trajectory(track, camera, setup, init=init)
+    catch = None
+    if caught is None or caught:
+        catch = catch_anchor(track, camera, setup, fit0.traj, check=caught is None, t_clip_end=t_clip_end)
+        if catch is not None and caught is None:
+            fit_c = fit_trajectory(track, camera, setup, init=fit0.traj, catch=catch)
+            if abs(np.log(fit_c.size_scale)) > RELEASE_MAX_SIZE_SHIFT:
+                catch = None
+            else:
+                fit0 = fit_c
+        elif catch is not None:
+            fit0 = fit_trajectory(track, camera, setup, init=fit0.traj, catch=catch)
+    got = catch is not None
     speed = float(np.linalg.norm(fit0.traj.vel(t_first)))
     if t_release_manual is not None:
         sig = np.hypot(EXTENSION_SIGMA_FT * FT, MANUAL_RELEASE_SIGMA_FRAMES * dt_frame * speed)
-        fit1 = fit_trajectory(track, camera, setup, init=fit0.traj, ext=(t_release_manual, y_exp, sig))
-        return PitchFit(fit1, True, t_release_manual, y_exp, "manual")
+        fit1 = fit_trajectory(track, camera, setup, init=fit0.traj, ext=(t_release_manual, y_exp, sig), catch=catch)
+        return PitchFit(fit1, True, t_release_manual, y_exp, "manual", got)
     late_m = RELEASE_LATE_FRAMES * dt_frame * speed
     t_release = t_first - RELEASE_LATE_FRAMES * dt_frame
     decide = observed is None
@@ -325,13 +381,13 @@ def fit_pitch(track: Track, camera: Camera, setup: Setup, init: Trajectory | Non
         observed = abs(y_first + late_m - y_exp) <= RELEASE_WINDOW_FT * FT
     if not observed:
         t_rel = fit0.traj.time_at_y(y_exp)
-        return PitchFit(fit0, False, t_first if t_rel is None else t_rel, y_exp, "estimated")
+        return PitchFit(fit0, False, t_first if t_rel is None else t_rel, y_exp, "estimated", got)
     sig = np.hypot(EXTENSION_SIGMA_FT * FT, RELEASE_LATE_SIGMA_FRAMES * dt_frame * speed)
-    fit1 = fit_trajectory(track, camera, setup, init=fit0.traj, ext=(t_first, y_exp - late_m, sig))
+    fit1 = fit_trajectory(track, camera, setup, init=fit0.traj, ext=(t_first, y_exp - late_m, sig), catch=catch)
     if decide and abs(np.log(fit1.size_scale)) > RELEASE_MAX_SIZE_SHIFT:
         t_rel = fit0.traj.time_at_y(y_exp)
-        return PitchFit(fit0, False, t_first if t_rel is None else t_rel, y_exp, "estimated")
-    return PitchFit(fit1, True, t_release, y_exp, "auto")
+        return PitchFit(fit0, False, t_first if t_rel is None else t_rel, y_exp, "estimated", got)
+    return PitchFit(fit1, True, t_release, y_exp, "auto", got)
 
 
 # ------------------------------------------------------------------------------------------ metrics
@@ -425,7 +481,7 @@ def metric_uncertainty(pf: PitchFit, track: Track, cameras: list[Camera], setup:
     for cam in cameras:
         try:
             pf2 = fit_pitch(sub, cam, setup, init=fit.traj, observed=pf.release_observed,
-                            t_release_manual=pf.t_release if pf.release_source == "manual" else None)
+                            t_release_manual=pf.t_release if pf.release_source == "manual" else None, caught=pf.caught)
         except (ValueError, np.linalg.LinAlgError):
             continue
         m = pitch_metrics(pf2.fit.traj, setup, pf2.release_time(pf2.fit.traj))

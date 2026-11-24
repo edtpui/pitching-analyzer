@@ -32,6 +32,7 @@ PITCHING_DISTANCES_FT = {60.5: 10.0, 54.0: 8.0, 50.0: 8.0, 46.0: 6.0}
 TYPICAL_HFOV_DEG = 66.0       # phone main camera in slow motion; a weak prior, only decisive if the marks are not
 FOCAL_PRIOR_SIGMA_LOG = 0.5   # ...e^0.5 = a factor 1.65 at one sigma
 CLICK_SIGMA_PX = 1.0          # assumed accuracy of a zoomed-in click, for the calibration uncertainty
+MAX_MARK_RMS_PX = 3.0         # worse than this, the marks are refused
 
 
 class CalibrationError(ValueError):
@@ -118,16 +119,24 @@ class Camera:
 class Calibration:
     camera: Camera
     rms_px: float
-    residuals_px: np.ndarray      # (7,) reprojection error of each mark: 5 plate corners (PLATE_XY order), 2 rubber
+    residuals_px: np.ndarray      # reprojection error of each mark: 5 plate corners (PLATE_XY order), then rubber
     plate_px: np.ndarray          # (5, 2) the marks, reordered to PLATE_XY
-    rubber_px: np.ndarray         # (2, 2) third-base end, first-base end
+    rubber_px: np.ndarray         # (2, 2) third-base end, first-base end; (0, 2) when the rubber is out of frame
     distance_ft: float
     mound_in: float
     camera_height_ft: float | None = None
+    camera_ahead_ft: float | None = None    # tape: camera ahead of the rubber's front edge (toward home; - = behind)
+    camera_side_ft: float | None = None     # tape: camera to the first-base side of the mound-plate line (- = third)
     samples: list[Camera] = field(default_factory=list)   # cameras re-solved with click noise
 
     @property
+    def has_rubber(self) -> bool:
+        return len(self.rubber_px) == 2
+
+    @property
     def world_points(self) -> np.ndarray:
+        if not self.has_rubber:
+            return plate_points()
         return np.vstack([plate_points(), rubber_points(self.distance_ft, self.mound_in)])
 
     @property
@@ -138,10 +147,16 @@ class Calibration:
         return camera_view(self.camera, self.distance_ft)
 
 
+RELEASE_VIEW_RADIUS = 4.5          # m: a camera this close to the rubber is filming the release up close
+
+
 def camera_view(camera: Camera, distance_ft: float) -> str:
-    """behind_plate | behind_pitcher | side, from where the camera stands relative to the pitching line."""
+    """release | behind_plate | behind_pitcher | side, from where the camera stands relative to the pitching
+    line. "release" is a camera within a few metres of the mound, aimed down the line (PitchLab's set-up)."""
     x, y, _ = camera.center
     d = distance_ft * FT
+    if np.hypot(x, y - d) <= RELEASE_VIEW_RADIUS and camera.R[2][1] < 0:
+        return "release"
     if y < PLATE_FRONT_Y and abs(x) < 1.2 * (PLATE_FRONT_Y - y) + 1.0:
         return "behind_plate"
     if y > d - 1.0 and abs(x) < 1.2 * (y - d) + 2.0:
@@ -155,19 +170,24 @@ def _convex_order(pts: np.ndarray) -> np.ndarray:
 
 
 CAMERA_HEIGHT_SIGMA = 1.5 * IN    # a tape-measured lens height
+CAMERA_XY_SIGMA = 3.0 * IN        # a tape-measured position on the ground
 
 
 def _residuals(params: np.ndarray, obj: np.ndarray, img: np.ndarray, cx: float, cy: float, logf0: float,
-               sigma_px: float, height: float | None) -> np.ndarray:
+               sigma_px: float, height: float | None, xy: np.ndarray | None = None) -> np.ndarray:
     logf, rvec, tvec = params[0], params[1:4], params[4:7]
     f = np.exp(logf)
     K = np.array([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]])
     proj, _ = cv2.projectPoints(obj, rvec, tvec, K, None)
     r = (proj.reshape(-1, 2) - img).ravel()
     extra = [sigma_px * (logf - logf0) / FOCAL_PRIOR_SIGMA_LOG]
-    if height is not None:
+    if height is not None or xy is not None:
         R = cv2.Rodrigues(np.asarray(rvec, float).reshape(3, 1))[0]
-        extra.append(sigma_px * ((-R.T @ tvec)[2] - height) / CAMERA_HEIGHT_SIGMA)
+        C = -R.T @ np.asarray(tvec, float)
+        if height is not None:
+            extra.append(sigma_px * (C[2] - height) / CAMERA_HEIGHT_SIGMA)
+        if xy is not None:
+            extra.extend(sigma_px * (C[:2] - xy) / CAMERA_XY_SIGMA)
     return np.append(r, extra)
 
 
@@ -180,7 +200,7 @@ def _valid(obj: np.ndarray, rvec: np.ndarray, tvec: np.ndarray) -> bool:
 
 def _solve(obj: np.ndarray, img: np.ndarray, size: tuple[int, int],
            init: tuple[float, np.ndarray, np.ndarray] | None = None,
-           height: float | None = None) -> tuple[Camera, float] | None:
+           height: float | None = None, xy: np.ndarray | None = None) -> tuple[Camera, float] | None:
     """Focal length and pose for fixed correspondences. Without `init`, a focal-length sweep with SQPnP
     seeds a joint Levenberg-Marquardt refinement."""
     w, h = size
@@ -194,7 +214,9 @@ def _solve(obj: np.ndarray, img: np.ndarray, size: tuple[int, int],
         for f in np.geomspace(0.25, 8.0, 56) * max(w, h):
             K = np.array([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]])
             try:
-                ok, rvec, tvec = cv2.solvePnP(obj, img, K, None, flags=cv2.SOLVEPNP_SQPNP)
+                # plate alone is planar: SQPnP needs spread in depth, IPPE is built for planes
+                flag = cv2.SOLVEPNP_IPPE if np.ptp(obj[:, 2]) < 1e-6 else cv2.SOLVEPNP_SQPNP
+                ok, rvec, tvec = cv2.solvePnP(obj, img, K, None, flags=flag)
             except cv2.error:
                 continue
             if not ok or not _valid(obj, rvec, tvec):
@@ -204,16 +226,31 @@ def _solve(obj: np.ndarray, img: np.ndarray, size: tuple[int, int],
             best.append((err, f, rvec.ravel(), tvec.ravel()))
         best.sort(key=lambda b: b[0])
         seeds = [np.concatenate([[np.log(f)], r, t]) for _, f, r, t in best[:3]]
+        if xy is not None and height is not None:
+            # measured position: seed with the camera standing there and looking at the marks' centre, across
+            # focal lengths. A plate only a few pixels tall is nearly planar-ambiguous for PnP, whose flipped
+            # pose puts the camera under the ground.
+            C = np.array([xy[0], xy[1], height])
+            target = obj.mean(axis=0)
+            for f in np.geomspace(0.25, 8.0, 28) * max(w, h):
+                z = (target - C) / np.linalg.norm(target - C)
+                x = np.cross(z, [0.0, 0.0, 1.0])
+                x /= np.linalg.norm(x)
+                R = np.vstack([x, np.cross(z, x), z])
+                # turn so the marks' centroid falls where it was clicked
+                off = np.array([(img[:, 0].mean() - cx) / f, (img[:, 1].mean() - cy) / f])
+                R = cv2.Rodrigues(np.array([off[1], -off[0], 0.0]))[0].T @ R
+                seeds.append(np.concatenate([[np.log(f)], cv2.Rodrigues(R)[0].ravel(), -R @ C]))
     out = None
     for x0 in seeds:
         try:
-            sol = least_squares(_residuals, x0, args=(obj, img, cx, cy, logf0, CLICK_SIGMA_PX, height), method="lm",
-                                x_scale="jac", max_nfev=400)
+            sol = least_squares(_residuals, x0, args=(obj, img, cx, cy, logf0, CLICK_SIGMA_PX, height, xy),
+                                method="lm", x_scale="jac", max_nfev=400)
         except ValueError:
             continue
         if not _valid(obj, sol.x[1:4], sol.x[4:7]):
             continue
-        cost = float(np.sum(sol.fun[: 2 * len(obj)] ** 2))
+        cost = float(np.sum(sol.fun[: 2 * len(obj)] ** 2) + (np.sum(sol.fun[2 * len(obj) + 1:] ** 2) if xy is not None else 0.0))
         if out is None or cost < out[1]:
             out = (Camera(f=float(np.exp(sol.x[0])), cx=cx, cy=cy, rvec=sol.x[1:4], tvec=sol.x[4:7],
                           width=w, height=h), cost)
@@ -222,16 +259,27 @@ def _solve(obj: np.ndarray, img: np.ndarray, size: tuple[int, int],
 
 def calibrate(plate_px, rubber_px, size: tuple[int, int], distance_ft: float = 60.5,
               mound_in: float | None = None, camera_height_ft: float | None = None, n_samples: int = 32,
-              seed: int = 0) -> Calibration:
+              seed: int = 0, camera_ahead_ft: float | None = None, camera_side_ft: float | None = None) -> Calibration:
     """Solve the camera from the five home-plate corners and the two front corners of the rubber, clicked in
     any order. Every assignment of the clicks to the plate's corners (5 rotations x 2 directions) and the
     rubber's ends is tried; the best one with the camera above the ground and in front of every mark wins.
     A measured lens height, if given, is a further constraint (it pins the camera distance, and with it the
-    focal length, independently of how precisely the small, far rubber was marked)."""
+    focal length, independently of how precisely the small, far rubber was marked).
+
+    Filming the release up close (PitchLab's set-up) leaves the rubber beside or behind the camera: then
+    the rubber is not marked, and the camera's tape-measured position (height, how far ahead of the rubber,
+    how far to the side) takes its place - home plate alone, 40 px wide at 60 ft, cannot fix the camera."""
     plate_px = np.asarray(plate_px, float).reshape(-1, 2)
-    rubber_px = np.asarray(rubber_px, float).reshape(-1, 2)
-    if plate_px.shape != (5, 2) or rubber_px.shape != (2, 2):
-        raise CalibrationError("mark all five corners of home plate and both front corners of the rubber")
+    rubber_px = np.asarray(rubber_px if rubber_px is not None else [], float).reshape(-1, 2)
+    if plate_px.shape != (5, 2) or rubber_px.shape not in ((2, 2), (0, 2)):
+        raise CalibrationError("mark all five corners of home plate, and both front corners of the rubber if it is "
+                               "in the picture")
+    have_pos = camera_ahead_ft is not None and camera_side_ft is not None
+    if len(rubber_px) == 0 and not (have_pos and camera_height_ft is not None):
+        raise CalibrationError("the rubber is not marked: enter the camera's measured height, distance ahead of the "
+                               "rubber and distance to the side instead")
+    if have_pos and not (-30.0 <= camera_ahead_ft <= 70.0 and -30.0 <= camera_side_ft <= 30.0):
+        raise CalibrationError("camera position must be within 30 ft of the pitching line")
     if not (np.all(np.isfinite(plate_px)) and np.all(np.isfinite(rubber_px))):
         raise CalibrationError("a marked point is not a number")
     if not (30.0 <= distance_ft <= 70.0):
@@ -247,18 +295,19 @@ def calibrate(plate_px, rubber_px, size: tuple[int, int], distance_ft: float = 6
     span = np.ptp(plate_px, axis=0)
     if max(span) < 8.0:
         raise CalibrationError("the plate corners are too close together; zoom in and mark them again")
-    if np.linalg.norm(rubber_px[0] - rubber_px[1]) < 3.0:
+    if len(rubber_px) == 2 and np.linalg.norm(rubber_px[0] - rubber_px[1]) < 3.0:
         raise CalibrationError("the two rubber corners are on top of each other")
+    xy = np.array([camera_side_ft, distance_ft - camera_ahead_ft]) * FT if have_pos else None
 
-    obj = np.vstack([plate_points(), rubber_points(distance_ft, mound_in)])
+    obj = plate_points() if len(rubber_px) == 0 else np.vstack([plate_points(), rubber_points(distance_ft, mound_in)])
     order = _convex_order(plate_px)
     best = None
     for shift in range(5):
         for step in (1, -1):
             idx = [int(order[(shift + step * k) % 5]) for k in range(5)]
-            for rub in (rubber_px, rubber_px[::-1]):
+            for rub in ((rubber_px, rubber_px[::-1]) if len(rubber_px) else (rubber_px,)):
                 img = np.vstack([plate_px[idx], rub])
-                sol = _solve(obj, img, (w, h), height=height)
+                sol = _solve(obj, img, (w, h), height=height, xy=xy)
                 if sol is not None and (best is None or sol[1] < best[1]):
                     best = (sol[0], sol[1], img)
     if best is None:
@@ -266,15 +315,22 @@ def calibrate(plate_px, rubber_px, size: tuple[int, int], distance_ft: float = 6
     cam, _, img = best
     proj, _ = cam.project(obj)
     res = np.linalg.norm(proj - img, axis=1)
+    if np.sqrt(np.mean(res ** 2)) > MAX_MARK_RMS_PX:
+        # clicks are good to about a pixel: a fit this loose means a misplaced mark, a wrong tape reading, or a
+        # plate too small in the picture to tell its corners apart
+        raise CalibrationError(f"the marks do not fit one camera (they miss by {np.sqrt(np.mean(res ** 2)):.1f} px on "
+                               "average): zoom in and re-mark the corners, and check the camera measurements")
     calib = Calibration(camera=cam, rms_px=float(np.sqrt(np.mean(res ** 2))), residuals_px=res,
-                        plate_px=img[:5], rubber_px=img[5:], distance_ft=float(distance_ft), mound_in=float(mound_in),
-                        camera_height_ft=camera_height_ft)
+                        plate_px=img[:5], rubber_px=img[5:].reshape(-1, 2), distance_ft=float(distance_ft),
+                        mound_in=float(mound_in), camera_height_ft=camera_height_ft, camera_ahead_ft=camera_ahead_ft,
+                        camera_side_ft=camera_side_ft)
     rng = np.random.default_rng(seed)
     init = (cam.f, cam.rvec, cam.tvec)
     for _ in range(n_samples):
         noisy = img + rng.normal(0.0, CLICK_SIGMA_PX, img.shape)
         hs = None if height is None else height + rng.normal(0.0, CAMERA_HEIGHT_SIGMA)
-        s = _solve(obj, noisy, (w, h), init=init, height=hs)
+        xys = None if xy is None else xy + rng.normal(0.0, CAMERA_XY_SIGMA, 2)
+        s = _solve(obj, noisy, (w, h), init=init, height=hs, xy=xys)
         if s is not None:
             calib.samples.append(s[0])
     return calib
@@ -282,8 +338,9 @@ def calibrate(plate_px, rubber_px, size: tuple[int, int], distance_ft: float = 6
 
 def calibration_from_dict(d: dict, n_samples: int = 32) -> Calibration:
     """Re-solve a stored calibration (marks + setup) so the camera and its samples are reproducible."""
-    return calibrate(d["plate_px"], d["rubber_px"], tuple(d["image_size"]), d["distance_ft"], d["mound_in"],
-                     camera_height_ft=d.get("camera_height_ft"), n_samples=n_samples)
+    return calibrate(d["plate_px"], d.get("rubber_px") or [], tuple(d["image_size"]), d["distance_ft"], d["mound_in"],
+                     camera_height_ft=d.get("camera_height_ft"), n_samples=n_samples,
+                     camera_ahead_ft=d.get("camera_ahead_ft"), camera_side_ft=d.get("camera_side_ft"))
 
 
 # ------------------------------------------------------------------------------------------ image refinement
@@ -318,6 +375,8 @@ def _coverage(poly_uv: np.ndarray, x0: int, y0: int, w: int, h: int) -> np.ndarr
 
 REFINE_EDGE_SIGMA = 0.7            # px: optics + compression blur of a real edge
 # passes of (edge sigma px, band half-width px): coarse-to-fine first, sharp-only as the fallback
+MIN_REFINE_OUTLINE_PX = 32.0      # smaller outlines are not refined at all
+SMALL_OUTLINE_PX = 60.0           # below this the blurred, wide coarse passes reach neighbouring chalk: sharp only
 REFINE_SCHEDULES = (((2.0, 8), (1.2, 6), (0.7, 5), (0.7, 5)), ((0.7, 5), (0.7, 5)))
 
 
@@ -344,12 +403,13 @@ def _refine_stage(cam0: Camera, img: np.ndarray, calib: Calibration, sigma: floa
     h_img, w_img = img.shape[:2]
     plate3d = plate_points()
     slab3d = _slab_corners(calib.distance_ft, calib.mound_in)
+    shapes = [plate3d, slab3d] if calib.has_rubber else [plate3d]
     obj = calib.world_points
     clicks = calib.image_points
 
     def polys(cam: Camera) -> list[np.ndarray] | None:
         out = []
-        for pts3 in (plate3d, slab3d):
+        for pts3 in shapes:
             uv, z = cam.project(pts3)
             if np.any(z <= 0.2):
                 return None
@@ -360,8 +420,10 @@ def _refine_stage(cam0: Camera, img: np.ndarray, calib: Calibration, sigma: floa
     if p0 is None:
         return "marks behind the camera"
     blocks = []
-    k_band = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band_px + 1,) * 2)
     for j, poly in enumerate(p0):
+        # a band wider than a small outline reaches past it (batter's-box chalk sits a few pixels from a far plate)
+        band = int(min(band_px, max(2, round(0.12 * float(np.ptp(poly, axis=0).max())))))
+        k_band = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band + 1,) * 2)
         lo = np.maximum(np.floor(poly.min(axis=0)).astype(int) - band_px - 3, 0)
         hi = np.minimum(np.ceil(poly.max(axis=0)).astype(int) + band_px + 3, [w_img, h_img])
         if np.any(hi - lo < 4):
@@ -382,9 +444,11 @@ def _refine_stage(cam0: Camera, img: np.ndarray, calib: Calibration, sigma: floa
 
     logf0 = float(np.log(cam0.width / 2.0 / np.tan(np.radians(TYPICAL_HFOV_DEG / 2))))
     height = None if calib.camera_height_ft is None else calib.camera_height_ft * FT
+    xy = (None if calib.camera_ahead_ft is None or calib.camera_side_ft is None
+          else np.array([calib.camera_side_ft, calib.distance_ft - calib.camera_ahead_ft]) * FT)
     x_base = np.concatenate([[np.log(cam0.f)], cam0.rvec, cam0.tvec])
     # scale each parameter so one unit moves the outline vertices by at most one pixel
-    verts = np.vstack([plate3d, slab3d])
+    verts = np.vstack(shapes)
     uv0 = cam0.project(verts)[0]
     sc = np.ones(7)
     for k in range(7):
@@ -403,11 +467,11 @@ def _refine_stage(cam0: Camera, img: np.ndarray, calib: Calibration, sigma: floa
         cam = camera_of(x)
         ps = polys(cam)
         out = []
-        for (xy, vals), poly in zip(blocks, ps if ps is not None else [None, None]):
+        for (pix, vals), poly in zip(blocks, ps if ps is not None else [None] * len(blocks)):
             if poly is None:
                 out.append(np.full(len(vals), 50.0))
                 continue
-            cov = _soft_coverage(poly, xy, sigma)
+            cov = _soft_coverage(poly, pix, sigma)
             A = np.column_stack([np.ones_like(cov), cov])
             coef, *_ = np.linalg.lstsq(A, vals, rcond=None)
             out.append((vals - A @ coef) / REFINE_PHOTO_SIGMA)
@@ -416,6 +480,8 @@ def _refine_stage(cam0: Camera, img: np.ndarray, calib: Calibration, sigma: floa
         out.append([CLICK_SIGMA_PX * (np.log(cam.f) - logf0) / FOCAL_PRIOR_SIGMA_LOG])
         if height is not None:
             out.append([CLICK_SIGMA_PX * (cam.center[2] - height) / CAMERA_HEIGHT_SIGMA])
+        if xy is not None:
+            out.append(CLICK_SIGMA_PX * (cam.center[:2] - xy) / CAMERA_XY_SIGMA)
         return np.concatenate(out)
 
     def jac(x: np.ndarray) -> np.ndarray:
@@ -450,7 +516,15 @@ def refine_with_image(calib: Calibration, gray: np.ndarray, n_samples: int = 32,
     result = None
     # wide bands can catch nearby chalk when the plate is tiny (filmed from behind the pitcher): if the
     # coarse-to-fine schedule is not trusted, try sharp edges only, starting from the clicks
-    for schedule in REFINE_SCHEDULES:
+    widths = [float(np.ptp(cam0.project(pts)[0], axis=0).max()) for pts in
+              ([plate_points(), rubber_points(calib.distance_ft, calib.mound_in)] if calib.has_rubber else [plate_points()])]
+    if min(widths) < MIN_REFINE_OUTLINE_PX:
+        # measured on synthetic fields: a plate ~25 px wide refines to a steady 6% focal-length bias, worse than
+        # the clicks it starts from; at ~37 px the refinement is still the better of the two
+        return calib, {"used": False, "reason": f"home plate is only {min(widths):.0f} px wide in the picture, too small "
+                                                f"to match its outline (film at 1080p or closer)"}
+    schedules = REFINE_SCHEDULES if min(widths) >= SMALL_OUTLINE_PX else REFINE_SCHEDULES[1:]
+    for schedule in schedules:
         cam = cam0
         stage = None
         for sigma, band in schedule:
@@ -475,7 +549,8 @@ def refine_with_image(calib: Calibration, gray: np.ndarray, n_samples: int = 32,
     res = np.linalg.norm(proj - clicks, axis=1)
     out = Calibration(camera=cam, rms_px=float(np.sqrt(np.mean(res ** 2))), residuals_px=res, plate_px=calib.plate_px,
                       rubber_px=calib.rubber_px, distance_ft=calib.distance_ft, mound_in=calib.mound_in,
-                      camera_height_ft=calib.camera_height_ft)
+                      camera_height_ft=calib.camera_height_ft, camera_ahead_ft=calib.camera_ahead_ft,
+                      camera_side_ft=calib.camera_side_ft)
     # uncertainty: parameter covariance of the photometric fit
     try:
         J = sol.jac

@@ -16,14 +16,14 @@ export function flightViews(h) {
   // ---------------------------------------------------------------- list
   async function list() {
     $view.append(el("div", { class: "page-head" }, el("h1", { text: "Pitch tracking" }),
-      el("span", { class: "muted small", text: "Velocity, movement and spin from a slow-motion clip filmed behind home plate" }),
+      el("span", { class: "muted small", text: "Velocity, movement and spin from a slow-motion clip filmed at the release" }),
       el("div", { class: "actions" }, el("a", { class: "button", href: "#/flights/new", text: "New pitch" }))));
     const body = el("div");
     $view.append(body);
     const render = items => {
       if (!items.length) {
         body.replaceChildren(section("No pitches yet", null, el("div", { class: "empty" },
-          el("p", { text: "Upload a 240 fps clip filmed from behind home plate with the plate and the rubber in view." }),
+          el("p", { text: "Upload a 240 fps clip filmed from just behind the pitcher, aimed at the catcher with home plate in view." }),
           el("a", { class: "button", href: "#/flights/new", text: "Upload a pitch" }))));
         return;
       }
@@ -107,12 +107,13 @@ export function flightViews(h) {
     });
     const tips = el("aside", { class: "block tips" }, el("h2", { text: "Filming checklist", style: "margin-bottom:8px" }),
       el("ol", {},
-        el("li", {}, el("strong", { text: "Behind home plate, on the line to the mound: " }), "tripod about 10-15 ft behind the plate, 4-6 ft high (above the catcher's head if there is one), landscape."),
-        el("li", {}, el("strong", { text: "Plate and rubber in view, unmoving: " }), "both must be visible in at least one frame - start recording before the pitcher steps onto the rubber. No zoom or panning while filming."),
+        el("li", {}, el("strong", { text: "Just behind the pitcher (as PitchLab films): " }), "tripod 3-6 ft behind the rubber and 1-2 ft to the throwing-arm side, about chest high, upright or landscape, aimed at the catcher so home plate is in the picture. A tripod 5-8 ft to the arm side, level with the rubber, also works."),
+        el("li", {}, el("strong", { text: "Measure where the camera stands: " }), "lens height, how far ahead of (or behind) the front of the rubber, and how far to the side of the mound-plate line. The plate alone is too small to place the camera."),
+        el("li", {}, el("strong", { text: "Home plate in view, camera still: " }), "the plate must be visible in at least one frame (start before the catcher sets up). No zoom or panning while filming."),
         el("li", {}, el("strong", { text: "240 fps slow motion. " }), "Spin from the seams needs 240 fps and the ball at least 14 px across near the plate; 120 fps gives velocity and movement only."),
         el("li", {}, el("strong", { text: "Bright light, fast shutter: " }), "outdoors in daylight works best; the ball must stand out from what is behind it."),
-        el("li", {}, el("strong", { text: "One pitch per clip, " }), "from before the delivery to after the catch."),
-        el("li", {}, el("strong", { text: "Behind the pitcher " }), "(raised and to the arm side) also works, with larger errors.")));
+        el("li", {}, el("strong", { text: "One pitch per clip, " }), "from before the delivery until the ball is in the glove and a moment after: from behind the pitcher the catch fixes the far end of the flight."),
+        el("li", {}, el("strong", { text: "Behind home plate " }), "(10-15 ft back, plate and rubber in view, no tape needed) also works; spin is then read near the plate.")));
     $view.append(el("div", { class: "form-grid" }, el("section", { class: "block" }, form), tips));
   }
 
@@ -197,7 +198,20 @@ export function flightViews(h) {
     distIn.value = String(prev?.distance_ft ?? opts.distance_ft ?? 60.5);
     if (![...distIn.options].some(o => o.value === distIn.value)) distIn.append(el("option", { value: distIn.value, text: `${distIn.value} ft` })) && (distIn.value = String(prev?.distance_ft ?? opts.distance_ft));
     const moundIn = fld("mound_in", { min: 0, max: 18, value: prev?.mound_in ?? opts.mound_in ?? 10, style: "width:80px" });
-    const camH = fld("camera_height_ft", { min: 0.5, max: 30, value: prev?.camera_height_ft ?? "", placeholder: "optional", style: "width:90px" });
+    const camH = fld("camera_height_ft", { min: 0.5, max: 30, value: prev?.camera_height_ft ?? "", placeholder: "ft", style: "width:80px" });
+    const camAhead = fld("camera_ahead_ft", { min: -30, max: 70, value: prev?.camera_ahead_ft ?? "", placeholder: "ft", style: "width:80px" });
+    const camSide = fld("camera_side_ft", { min: 0, max: 30, value: prev?.camera_side_ft != null ? Math.abs(prev.camera_side_ft) : "", placeholder: "ft", style: "width:80px" });
+    const sideSel = el("select", { "aria-label": "Side of the mound-plate line" }, el("option", { value: "-1", text: "third-base side" }), el("option", { value: "1", text: "first-base side" }));
+    if (prev?.camera_side_ft > 0) sideSel.value = "1";
+    const tape = () => {
+      const h = parseFloat(camH.value), a = parseFloat(camAhead.value), sd = parseFloat(camSide.value);
+      return { h: isFinite(h) ? h : null, ahead: isFinite(a) ? a : null, side: isFinite(sd) ? sd * parseFloat(sideSel.value) : null };
+    };
+    const ready = () => {
+      const t = tape();
+      return marks.plate.length === 5 && (marks.rubber.length === 2 || (t.h !== null && t.ahead !== null && t.side !== null));
+    };
+    [camH, camAhead, camSide, sideSel].forEach(x => x.addEventListener("input", () => { check.disabled = !ready(); }));
     const check = el("button", { class: "secondary", text: "Check marks" });
     const analyze = el("button", { text: "Analyze pitch", disabled: !prev });
     const copySel = el("select", { "aria-label": "Copy the marks of another clip" }, el("option", { value: "", text: "Copy marks from another clip…" }));
@@ -257,8 +271,9 @@ export function flightViews(h) {
       marks.plate.forEach((p, i) => mark(p, `P${i + 1}`, "#4fc3ff"));
       marks.rubber.forEach((p, i) => mark(p, `R${i + 1}`, "#ff9a3c"));
       counter.textContent = `Home plate ${marks.plate.length}/5 · rubber ${marks.rubber.length}/2` +
-        (marks.plate.length < 5 ? " · next: a corner of home plate" : marks.rubber.length < 2 ? " · next: a front corner of the rubber" : " · all marked");
-      check.disabled = marks.plate.length < 5 || marks.rubber.length < 2;
+        (marks.plate.length < 5 ? " · next: a corner of home plate" : marks.rubber.length === 1 ? " · next: the other front corner of the rubber"
+          : marks.rubber.length === 0 ? " · plate done (rubber only if it is in the picture)" : " · all marked");
+      check.disabled = !ready();
     }
 
     function hit(cx, cy) {
@@ -332,14 +347,17 @@ export function flightViews(h) {
     function showResult(rec) {
       overlay = rec.overlay;
       const p = rec.camera_position_ft;
-      const behind = p[1] < 0 ? `${fmtNum(-p[1], 1)} ft behind the back of the plate` : `${fmtNum(p[1] - rec.distance_ft, 1)} ft behind the rubber`;
+      const ahead = rec.distance_ft - p[1];
+      const behind = p[1] < 0 ? `${fmtNum(-p[1], 1)} ft behind the back of the plate`
+        : ahead >= 0 ? `${fmtNum(ahead, 1)} ft ahead of the rubber` : `${fmtNum(-ahead, 1)} ft behind the rubber`;
       const ref = rec.refinement || {};
+      const viewName = { release: "Camera at the release. ", behind_plate: "Camera behind home plate. ", behind_pitcher: "Camera behind the pitcher. " }[rec.view] || "Camera to the side. ";
       summary.replaceChildren(
-        el("strong", { text: rec.view === "behind_plate" ? "Camera behind home plate. " : rec.view === "behind_pitcher" ? "Camera behind the pitcher. " : "Camera to the side. " }),
+        el("strong", { text: viewName }),
         `${behind}, ${fmtNum(p[2], 1)} ft high, ${fmtNum(Math.abs(p[0]), 1)} ft to the ${p[0] >= 0 ? "first" : "third"}-base side; field of view ${fmtNum(rec.hfov_deg, 0)}°. `,
         `Marks fit within ${fmtNum(rec.rms_px, 1)} px (worst ${fmtNum(Math.max(...rec.residuals_px), 1)} px). `,
-        ref.used ? "The plate and rubber outlines were matched to the picture." : el("span", { class: "warn-text", text: `Outlines not matched (${ref.reason || "no reason given"}): the clicks are used as they are.` }),
-        el("br"), "Check that the yellow outlines sit on the plate and the rubber and that the white box is where the strike zone should be.");
+        ref.used ? (rec.rubber_px?.length ? "The plate and rubber outlines were matched to the picture." : "The plate outline was matched to the picture.") : el("span", { class: "warn-text", text: `Outlines not matched (${ref.reason || "no reason given"}): the clicks are used as they are.` }),
+        el("br"), "Check that the yellow outline sits on the plate, the camera position matches your tape, and the white box is where the strike zone should be.");
       analyze.disabled = false;
       draw();
     }
@@ -348,11 +366,13 @@ export function flightViews(h) {
       check.disabled = true; summary.textContent = "Solving the camera…";
       try {
         const body = { plate_px: marks.plate, rubber_px: marks.rubber, image: imageSource, distance_ft: parseFloat(distIn.value), mound_in: parseFloat(moundIn.value) };
-        const h = parseFloat(camH.value);
-        if (isFinite(h)) body.camera_height_ft = h;
+        const t = tape();
+        if (t.h !== null) body.camera_height_ft = t.h;
+        if (t.ahead !== null) body.camera_ahead_ft = t.ahead;
+        if (t.side !== null) body.camera_side_ft = t.side;
         showResult(await api(`/api/flights/${meta.id}/calibration`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
       } catch (e) { summary.textContent = e.message; analyze.disabled = true; }
-      finally { check.disabled = marks.plate.length < 5 || marks.rubber.length < 2; }
+      finally { check.disabled = !ready(); }
     });
     copySel.addEventListener("change", async () => {
       if (!copySel.value) return;
@@ -386,21 +406,26 @@ export function flightViews(h) {
           el("h2", { text: "Mark the field", style: "margin-bottom:6px" }),
           el("ol", { class: "small calib-steps" },
             el("li", {}, "Click the ", el("strong", { text: "five corners of home plate" }), " (any order)."),
-            el("li", {}, "Click the ", el("strong", { text: "two front corners of the pitching rubber" }), " - the edge facing home plate."),
+            el("li", {}, "Filmed at the release, the rubber is out of the picture: enter where the camera stands instead. Filmed from behind the plate, click the ", el("strong", { text: "two front corners of the rubber" }), " (the tape is then optional)."),
             el("li", {}, "Zoom in (mouse wheel or +) and place each mark exactly on its corner; drag a mark to move it, right-click to remove it."),
-            el("li", {}, "If someone covers the plate or the rubber, pick a frame where both are visible.")),
+            el("li", {}, "If someone covers the plate, pick a frame where it is visible.")),
           el("div", { class: "fields compact" },
             el("label", { class: "f", text: "Pitching distance" }), distIn,
             el("label", { class: "f", text: "Mound height (in)" }), moundIn,
-            el("label", { class: "f", text: "Camera height (ft)" }), camH,
-            el("div", { class: "help", text: "Optional: tape-measured from the ground to the lens. Tightens the calibration." })),
+            el("div", { class: "sep", text: "Camera position (tape measure)" }),
+            el("label", { class: "f", text: "Lens height" }), camH,
+            el("label", { class: "f", text: "Ahead of rubber" }), camAhead,
+            el("div", { class: "help", text: "Along the line to home, from the rubber's front edge to the lens; negative if the camera is behind the rubber." }),
+            el("label", { class: "f", text: "To the side" }), el("div", { class: "row" }, camSide, sideSel),
+            el("div", { class: "help", text: "Straight out from the mound-plate line to the lens." })),
           el("div", { class: "row calib-actions" }, check, analyze),
           copySel, summary)));
     new ResizeObserver(() => { if (img.naturalWidth) fit(); }).observe(wrap);
     await loadImage();
     if (prev) {
       try { showResult(await api(`/api/flights/${meta.id}/calibration`, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plate_px: prev.plate_px, rubber_px: prev.rubber_px, image: prev.image, distance_ft: prev.distance_ft, mound_in: prev.mound_in, camera_height_ft: prev.camera_height_ft }) })); }
+        body: JSON.stringify({ plate_px: prev.plate_px, rubber_px: prev.rubber_px, image: prev.image, distance_ft: prev.distance_ft, mound_in: prev.mound_in,
+          camera_height_ft: prev.camera_height_ft, camera_ahead_ft: prev.camera_ahead_ft, camera_side_ft: prev.camera_side_ft }) })); }
       catch { /* stale marks: the user re-marks */ }
     }
   }
@@ -464,6 +489,7 @@ export function flightViews(h) {
     document.addEventListener("keydown", keyHandler);
     onTeardown(() => document.removeEventListener("keydown", keyHandler));
     const rel = r.release;
+    const catchText = r.catch?.used ? " · far end anchored at the catch" : "";
     const relText = { auto: "first frame the ball was seen out of the hand", manual: "set by you", estimated: "not seen - estimated from the flight" }[rel.source] || rel.source;
     const relStatus = el("span", { class: "small muted", role: "status" });
     const setRel = async frame => {
@@ -472,7 +498,7 @@ export function flightViews(h) {
       catch (e) { relStatus.textContent = e.message; }
     };
     const relRow = el("div", { class: "release-row" },
-      el("span", {}, el("strong", { text: "Release: " }), rel.frame != null ? `frame ${rel.frame - tr.first_frame + 1}` : "–", el("span", { class: "muted small", text: ` (${relText})` })),
+      el("span", {}, el("strong", { text: "Release: " }), rel.frame != null ? `frame ${rel.frame - tr.first_frame + 1}` : "–", el("span", { class: "muted small", text: ` (${relText})${catchText}` })),
       el("button", { class: "ghost", text: "Go to", disabled: rel.frame == null, onclick: () => seek(rel.frame - tr.first_frame) }),
       el("button", { class: "secondary", text: "Set release here", title: "Step to the frame where the ball leaves the hand (keys , and .) and click", onclick: () => setRel(tr.first_frame + current()) }),
       rel.source === "manual" ? el("button", { class: "ghost", text: "Automatic", onclick: () => setRel(null) }) : null,
@@ -503,7 +529,7 @@ export function flightViews(h) {
     // details
     const c = r.calibration, f = r.fit;
     const rows = [
-      ["Camera", `${c.view?.replace("_", " ")} · ${fmtNum(-c.camera_position_ft[1], 1)} ft behind the plate's back tip, ${fmtNum(c.camera_position_ft[2], 1)} ft high · field of view ${fmtNum(c.hfov_deg, 0)}°`],
+      ["Camera", `${c.view?.replace("_", " ")} · ${fmtNum(c.camera_position_ft[1], 1)} ft from the plate's back tip toward the mound, ${fmtNum(c.camera_position_ft[0], 1)} ft to the side, ${fmtNum(c.camera_position_ft[2], 1)} ft high · field of view ${fmtNum(c.hfov_deg, 0)}°`],
       ["Field marks", `fit within ${fmtNum(c.rms_px, 2)} px · outlines ${c.refinement?.used ? "matched to the picture" : "not matched"}${c.camera_height_ft ? ` · camera height ${c.camera_height_ft} ft` : ""}`],
       ["Ball track", `${f.points} frames (${f.inliers} used), frames ${f.first_frame}-${f.last_frame}, residual ${fmtNum(f.rms_px, 2)} px`],
       ["Scale", `${rel.observed ? "release distance (time of flight over a known distance)" : "ball size only"} · ball-size factor ${fmtNum(f.size_scale, 3)}`],

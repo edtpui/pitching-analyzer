@@ -158,19 +158,23 @@ def solve_calibration(d: Path, meta: dict, body: dict, n_samples: int = 32) -> t
     h, w = image.shape[:2]
     distance = float(body.get("distance_ft") or opts.distance_ft)
     mound = float(body["mound_in"]) if body.get("mound_in") is not None else float(opts.mound_in)
-    height = body.get("camera_height_ft")
-    height = None if height in (None, "") else float(height)
+    num = lambda k: None if body.get(k) in (None, "") else float(body[k])   # noqa: E731
+    height, ahead, side = num("camera_height_ft"), num("camera_ahead_ft"), num("camera_side_ft")
+    rubber = body.get("rubber_px") or []
     try:
-        calib = calibrate(body["plate_px"], body["rubber_px"], (w, h), distance, mound, camera_height_ft=height,
-                          n_samples=n_samples)
+        calib = calibrate(body["plate_px"], rubber, (w, h), distance, mound, camera_height_ft=height,
+                          n_samples=n_samples, camera_ahead_ft=ahead, camera_side_ft=side)
     except (KeyError, TypeError) as exc:
-        raise CalibrationError("mark all five corners of home plate and both front corners of the rubber") from exc
+        raise CalibrationError("mark all five corners of home plate, and both front corners of the rubber or the "
+                               "camera's measured position") from exc
     refined, rinfo = refine_with_image(calib, cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), n_samples=n_samples)
     cam = refined.camera
     record = {
-        "plate_px": np.asarray(body["plate_px"], float).tolist(), "rubber_px": np.asarray(body["rubber_px"], float).tolist(),
+        "plate_px": np.asarray(body["plate_px"], float).tolist(),
+        "rubber_px": np.asarray(rubber, float).reshape(-1, 2).tolist(),
         "image": body.get("image", "background"), "image_size": [w, h], "distance_ft": distance, "mound_in": mound,
-        "camera_height_ft": height, "camera": cam.as_dict(), "rms_px": calib.rms_px,
+        "camera_height_ft": height, "camera_ahead_ft": ahead, "camera_side_ft": side,
+        "camera": cam.as_dict(), "rms_px": calib.rms_px,
         "residuals_px": calib.residuals_px.tolist(), "refinement": {k: v for k, v in rinfo.items()},
         "view": camera_view(cam, distance), "camera_position_ft": (cam.center / FT).tolist(), "hfov_deg": cam.hfov_deg,
         "computed_utc": _now(),
@@ -217,11 +221,11 @@ def _warnings(opts: FlightOptions, fps: float, pf: PitchFit, m: dict, calib_rec:
                  "speed: it rests on the ball's apparent size (wider error). If you can see the release in the video, "
                  "step to it and use “Set release here”.")
     if calib_rec.get("view") == "behind_pitcher":
-        w.append("Filmed from behind the pitcher: the plate end of the flight is far and small, so velocity and "
-                 "movement are less certain than from behind home plate.")
+        w.append("Filmed from far behind the pitcher: the ball is small at both ends, so velocity, movement and spin "
+                 "are less certain than with the phone a few feet from the release, on the arm side.")
     elif calib_rec.get("view") == "side":
-        w.append("The camera is not along the pitching line; the method is built for behind-the-plate or "
-                 "behind-the-pitcher views, so treat the numbers with caution.")
+        w.append("The camera is not along the pitching line; the method is built for a camera at the release or "
+                 "behind home plate, so treat the numbers with caution.")
     if not calib_rec.get("refinement", {}).get("used"):
         w.append("The plate and rubber outlines could not be matched to the picture, so the marks were used exactly "
                  "as clicked; zoom in and re-mark them for a more precise calibration.")
@@ -276,10 +280,11 @@ def _result(d: Path, meta: dict, opts: FlightOptions, calib: Calibration, calib_
         "analysis_version": __version__, "kind": "flight", "computed_utc": _now(),
         "setup": asdict(setup), "video": meta["video"],
         "calibration": {k: calib_rec.get(k) for k in ("view", "camera_position_ft", "hfov_deg", "rms_px", "residuals_px",
-                                                      "refinement", "image", "camera_height_ft", "distance_ft",
+                                                      "refinement", "image", "camera_height_ft", "camera_ahead_ft", "camera_side_ft", "distance_ft",
                                                       "mound_in")},
         "pitch": m, "uncertainty": sd,
         "release": {"observed": pf.release_observed, "source": pf.release_source, "t": t_rel, "frame": release_frame},
+        "catch": {"used": pf.caught},
         "spin": spin_d,
         "movement_spin": {"tilt_clock": m.get("movement_tilt_clock"), "tilt_deg": m.get("movement_tilt_deg"),
                           "axis_deg": m.get("movement_axis_deg"), "active_rpm_est": m.get("active_spin_est_rpm"),
@@ -287,7 +292,7 @@ def _result(d: Path, meta: dict, opts: FlightOptions, calib: Calibration, calib_
         "trajectory": traj.as_dict(),
         "fit": {"rms_px": pf.fit.rms_px, "points": int(len(track)), "inliers": int(pf.fit.inliers.sum()),
                 "size_scale": pf.fit.size_scale, "first_frame": int(track.frame[0]), "last_frame": int(track.frame[-1]),
-                "extension_prior_used": pf.fit.extension_prior_used},
+                "extension_prior_used": pf.fit.extension_prior_used, "catch_prior_used": pf.fit.catch_prior_used},
         "track": {"frame": [int(f) for f in track.frame], "u": np.round(track.uv[:, 0], 2).tolist(),
                   "v": np.round(track.uv[:, 1], 2).tolist(), "d": np.round(track.d, 2).tolist()},
     }
@@ -364,7 +369,7 @@ def analyze(d: Path, meta: dict, progress: Callable[[float, str], None] = lambda
     track = meas.track if len(meas.track) >= 8 else track0
     progress(0.64, "Fitting the trajectory")
     try:
-        pf = fit_pitch(track, cam, setup, init=fit0.traj)
+        pf = fit_pitch(track, cam, setup, init=fit0.traj, t_clip_end=frames[-1].t)
     except (ValueError, np.linalg.LinAlgError) as exc:
         raise FlightError(f"The ball track could not be fitted: {exc}") from exc
     fps = float(meta["video"]["fps_effective"])
@@ -403,7 +408,8 @@ def recompute_release(d: Path, meta: dict, frame: int | None) -> dict:
         t_manual = t0 + (int(frame) - int(meta["video"]["first_frame"])) / fps
         if t_manual >= track.t[0] + 0.5 * (track.t[-1] - track.t[0]):
             raise ValueError("the release must be before the ball's flight")
-    pf = fit_pitch(track, calib.camera, setup, init=Trajectory.from_dict(prev["trajectory"]), t_release_manual=t_manual)
+    pf = fit_pitch(track, calib.camera, setup, init=Trajectory.from_dict(prev["trajectory"]), t_release_manual=t_manual,
+                   caught=bool((prev.get("catch") or {}).get("used", False)))
     res = _result(d, meta, opts, calib, calib_rec, track, pf, [], prev.get("spin") or {}, None, {"t0": t0})
     _render(d, meta, opts, calib, res, track, t0)
     res["processing_s"] = prev.get("processing_s")

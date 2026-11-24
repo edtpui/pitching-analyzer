@@ -232,6 +232,7 @@ class Scene:
     throws: str = "R"
     light: np.ndarray | None = None  # world direction toward the sun; default high behind the camera
     lead_empty_s: float = 0.0        # empty field (no pitcher, no ball) before t_start, as before he steps on
+    catch_y: float | None = None     # m: the ball disappears into the catcher's glove here (None: flies on)
 
 
 @dataclass
@@ -302,9 +303,12 @@ def render_clip(path: Path, scene: Scene, container_fps: float | None = None) ->
                 if ts <= 0:
                     centres.append((_hand(scene, ts) + np.array([0.0, -0.02, 0.0]), pitch.orientation(0.0)))
                 else:
-                    centres.append((pitch.at(ts)[0][0], pitch.orientation(ts)))
-            uv_c, z_c = cam.project(np.array([c for c, _ in centres]))
-            if not empty and np.all(z_c > 0.3):
+                    pos = pitch.at(ts)[0][0]
+                    if scene.catch_y is not None and pos[1] < scene.catch_y:
+                        continue
+                    centres.append((pos, pitch.orientation(ts)))
+            uv_c, z_c = cam.project(np.array([c for c, _ in centres])) if centres else (None, None)
+            if not empty and centres and np.all(z_c > 0.3):
                 r_px = cam.f * BALL_R / z_c.min() * 1.4 + 2
                 lo = np.floor(uv_c.min(axis=0) - r_px).astype(int)
                 hi = np.ceil(uv_c.max(axis=0) + r_px).astype(int)
@@ -346,7 +350,8 @@ def render_clip(path: Path, scene: Scene, container_fps: float | None = None) ->
             if tk > 0:
                 P = pitch.at(tk)[0]
                 uv, z = cam.project(P)
-                inside = (z[0] > 0.5 and -5 <= uv[0, 0] <= cam.width + 5 and -5 <= uv[0, 1] <= cam.height + 5)
+                caught = scene.catch_y is not None and P[0][1] < scene.catch_y
+                inside = (not caught and z[0] > 0.5 and -5 <= uv[0, 0] <= cam.width + 5 and -5 <= uv[0, 1] <= cam.height + 5)
                 if inside:
                     uv_true[k] = uv[0]
                     rho = np.linalg.norm(P[0] - cam.center)
@@ -382,3 +387,19 @@ def behind_plate_camera(size=(1920, 1080)) -> Camera:
 
 def behind_pitcher_camera(size=(1920, 1080)) -> Camera:
     return look_at([-1.0, 60.5 * FT + 5.0, 2.6], [0.0, 9.0, 0.0], 60.0, size)
+
+
+def release_camera(size=(1920, 1080), throws: str = "R") -> Camera:
+    """PitchLab's set-up: a phone a couple of metres from the release, on the arm side and slightly behind,
+    aimed down the line so the ball is large as it leaves the hand and the plate is in the far picture."""
+    side = -1.0 if throws == "R" else 1.0
+    return look_at([side * 1.6, 60.5 * FT + 0.25, 1.7], [0.0, 8.0, 0.9], 65.0, size)
+
+
+def pitchlab_camera(size=(1080, 1920), throws: str = "R", behind_ft: float = 4.0, side_ft: float = 1.5,
+                    height_ft: float = 4.8, hfov_deg: float = 36.0) -> Camera:
+    """PitchLab's own set-up, read off its app's screenshots: a phone upright (portrait) a few feet behind the
+    rubber on the throwing-arm side, about chest high, aimed at the catcher. The ball is large as it leaves
+    the hand; home plate is a thin sliver about 40 px wide far down the picture."""
+    side = -1.0 if throws == "R" else 1.0
+    return look_at([side * side_ft * FT, (60.5 + behind_ft) * FT, height_ft * FT], [0.0, 0.2, 0.55], hfov_deg, size)

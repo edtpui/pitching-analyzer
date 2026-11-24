@@ -11,7 +11,7 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from flight_synth import (BallTexture, Scene, behind_pitcher_camera, behind_plate_camera, curveball,
-                          field_background, fastball, look_at, render_clip)
+                          field_background, fastball, look_at, pitchlab_camera, release_camera, render_clip)
 from pitchlab.flight.blob import KIND_MINOR, crop_at, measure_crop
 from pitchlab.flight.detect import AREA, D, DKIND, NCOL, PEAK, REFINED, U, V, FrameCandidates
 from pitchlab.flight.geometry import (FT, IN, MPH, CalibrationError, Camera, calibrate, camera_view, plate_points,
@@ -51,6 +51,36 @@ def test_calibration_recovers_the_camera_from_marks_in_any_order(make_cam, view)
     assert np.allclose(c.plate_px[0], plate[0], atol=1e-6)
 
 
+def _tape(cam, rng=None, noise=(0.0, 0.0)):
+    """The camera's tape-measured position, as the marking page asks for it."""
+    rng = rng or np.random.default_rng(0)
+    C = cam.center / FT
+    return dict(camera_height_ft=C[2] + rng.normal(0, noise[0]), camera_ahead_ft=60.5 - C[1] + rng.normal(0, noise[1]),
+                camera_side_ft=C[0] + rng.normal(0, noise[1]))
+
+
+def test_release_view_calibrates_from_the_plate_and_a_tape_measure():
+    """PitchLab's set-up: the rubber is beside the camera, so the plate plus the measured camera position
+    fix the camera, and the plate's outline sharpens it."""
+    cam = release_camera()
+    plate, rubber = marks(cam)
+    assert not np.all((rubber > 0) & (rubber < [cam.width, cam.height]))      # rubber out of the picture
+    gray = cv2.cvtColor(field_background(cam, 60.5, 10.0), cv2.COLOR_BGR2GRAY)
+    errs = []
+    for seed in range(4):
+        rng = np.random.default_rng(seed)
+        c = calibrate(plate + rng.normal(0, 1.0, (5, 2)), [], (cam.width, cam.height), 60.5, 10.0, n_samples=0,
+                      **_tape(cam, rng, (1.5 / 12, 3 / 12)))
+        r, info = refine_with_image(c, gray, n_samples=0)
+        assert info["used"], info
+        assert r.view() == "release"
+        errs.append(abs(r.camera.f / cam.f - 1))
+        assert np.linalg.norm(r.camera.center - cam.center) < 0.4
+    # measured: a steady ~2% focal-length bias from fitting the small plate outline alone (the release
+    # anchor, not the focal length, sets the speed scale in this view)
+    assert max(errs) < 0.03
+
+
 def test_calibration_rejects_bad_marks():
     cam = behind_plate_camera()
     plate, rubber = marks(cam)
@@ -67,6 +97,8 @@ def test_calibration_rejects_bad_marks():
         calibrate(bad, rubber, size)
     with pytest.raises(CalibrationError):
         calibrate(plate, rubber, size, distance_ft=90.0)
+    with pytest.raises(CalibrationError):                                   # no rubber and no tape
+        calibrate(plate, [], size, camera_height_ft=4.0)
 
 
 def test_photometric_refinement_sharpens_a_rough_calibration():
@@ -100,9 +132,9 @@ def test_refinement_declines_when_the_picture_has_no_field():
 
 
 # ------------------------------------------------------------------------------------------ trajectory
-def _track_from_truth(pitch, cam, fps=240.0, noise=0.6, size_bias=1.0, start=0.004, seed=0):
+def _track_from_truth(pitch, cam, fps=240.0, noise=0.6, size_bias=1.0, start=0.004, seed=0, end_y=17 * IN):
     rng = np.random.default_rng(seed)
-    t = np.arange(start, pitch.plate_time(), 1 / fps)
+    t = np.arange(start, pitch.plate_time(end_y), 1 / fps)
     P, _ = pitch.at(t)
     uv, z = cam.project(P)
     d = 2 * cam.f * 1.45 * IN / z
@@ -139,6 +171,33 @@ def test_release_anchor_survives_a_size_bias():
         m = pitch_metrics(pf.fit.traj, Setup(), pf.release_time(pf.fit.traj))
         assert pf.release_observed
         assert m["release_speed_mph"] == pytest.approx(v_true, abs=2.0)
+
+
+def test_catch_anchors_the_far_end_filmed_from_behind_the_release():
+    """PitchLab's view: the ball flies straight away from the lens and sizes 6% off would put the speed out by
+    as much. Followed into the glove (just behind the plate) with video after it, the catch fixes the far end."""
+    for pitch in (fastball(), curveball()):
+        cam = pitchlab_camera()
+        assert camera_view(cam, 60.5) == "release"
+        track = _track_from_truth(pitch, cam, size_bias=0.94, end_y=-0.5 * FT)
+        pf = fit_pitch(track, cam, Setup(), t_clip_end=track.t[-1] + 0.1)
+        assert pf.caught and pf.fit.catch_prior_used
+        m = pitch_metrics(pf.fit.traj, Setup(), pf.release_time(pf.fit.traj))
+        mt = true_metrics(pitch)
+        assert m["release_speed_mph"] == pytest.approx(mt["release_speed_mph"], abs=1.5)
+        assert m["ivb_in"] == pytest.approx(mt["ivb_in"], abs=1.5)
+
+
+def test_catch_is_not_assumed_when_the_track_ends_some_other_way():
+    pitch, cam = fastball(), pitchlab_camera()
+    track = _track_from_truth(pitch, cam, end_y=-0.5 * FT)
+    assert not fit_pitch(track, cam, Setup(), t_clip_end=track.t[-1]).caught          # the video ran out
+    assert not fit_pitch(track, cam, Setup()).caught                                   # clip end unknown
+    lost = _track_from_truth(pitch, cam, end_y=20 * FT)                                # lost 20 ft short
+    assert not fit_pitch(lost, cam, Setup(), t_clip_end=lost.t[-1] + 0.1).caught
+    plate_cam = behind_plate_camera()                                                  # not a release view
+    track = _track_from_truth(pitch, plate_cam)
+    assert not fit_pitch(track, plate_cam, Setup(), t_clip_end=track.t[-1] + 0.1).caught
 
 
 def test_manual_release_anchors_a_late_track():
@@ -310,9 +369,9 @@ def _wait(client, fid, statuses, timeout=600):
 
 
 def test_flight_end_to_end(client, tmp_path):
-    """Upload a synthetic behind-the-plate fastball, mark the field on an empty frame, analyze, override
-    the release, and read the results back."""
-    cam = behind_plate_camera((1280, 720))
+    """Upload a synthetic fastball filmed at the release (PitchLab's set-up), mark the plate on an empty
+    frame with the camera's taped position, analyze, override the release, and read the results back."""
+    cam = release_camera((1280, 720))
     clip = tmp_path / "pitch.mp4"
     truth = render_clip(clip, Scene(cam=cam, pitch=fastball(), lead_empty_s=0.25))
     r = client.post("/api/flights", files={"file": ("pitch.mp4", clip.read_bytes(), "video/mp4")},
@@ -327,19 +386,22 @@ def test_flight_end_to_end(client, tmp_path):
     assert client.post(f"/api/flights/{fid}/analyze").status_code == 409          # no calibration yet
     assert client.post(f"/api/flights/{fid}/calibration", json={"plate_px": [[1, 2]], "image": 0}).status_code == 422
     rng = np.random.default_rng(1)
-    plate, rubber = truth.plate_px + rng.normal(0, 0.8, (5, 2)), truth.rubber_px + rng.normal(0, 0.8, (2, 2))
-    r = client.post(f"/api/flights/{fid}/calibration", json={"plate_px": plate.tolist(), "rubber_px": rubber.tolist(), "image": 0})
+    plate = truth.plate_px + rng.normal(0, 0.8, (5, 2))
+    r = client.post(f"/api/flights/{fid}/calibration", json={"plate_px": plate.tolist(), "image": 0})
+    assert r.status_code == 422                                               # rubber out of frame, no tape
+    r = client.post(f"/api/flights/{fid}/calibration", json={"plate_px": plate.tolist(), "image": 0, **_tape(cam, rng, (0.1, 0.2))})
     assert r.status_code == 200, r.text
     cal = r.json()
-    assert cal["view"] == "behind_plate" and cal["overlay"]["zone"] is not None
-    assert np.allclose(np.array(cal["camera_position_ft"]) * FT, cam.center, atol=0.25)
+    assert cal["view"] == "release" and cal["overlay"]["zone"] is not None
+    assert np.linalg.norm(np.array(cal["camera_position_ft"]) * FT - cam.center) < 0.5   # plate ~25 px wide at 720p
     assert client.post(f"/api/flights/{fid}/analyze").status_code == 202
     meta = _wait(client, fid, ("done", "failed"))
     assert meta["status"] == "done", meta.get("error")
     res = client.get(f"/api/flights/{fid}").json()["result"]
     p = res["pitch"]
     v_true = np.linalg.norm(truth.scene.pitch.vel[0]) / MPH
-    assert p["release_speed_mph"] == pytest.approx(v_true, abs=6.0)
+    assert res["release"]["observed"]                                          # the ball is seen leaving the hand
+    assert p["release_speed_mph"] == pytest.approx(v_true, abs=3.0)
     assert res["uncertainty"]["release_speed_mph"] > 0
     assert p["strike"] is True
     assert res["spin"]["ok"] and res["spin"]["rpm"] == pytest.approx(2300, rel=0.05)

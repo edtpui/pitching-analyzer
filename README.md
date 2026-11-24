@@ -6,7 +6,7 @@ height, foot plant, max layback, release), 26 mechanics metrics with percentiles
 coaching summary (rule-based, or written by Claude if an API key is set).
 
 A second section, **Pitch tracking**, measures the ball instead of the body: from a slow-motion clip filmed
-behind home plate it gives release and plate velocity, induced vertical and horizontal break, release point,
+from just behind the pitcher, aimed at the catcher (as PitchLab films), it gives release and plate velocity, induced vertical and horizontal break, release point,
 plate location, and spin (rate, axis, efficiency and gyro from the seams; tilt and active spin from the
 movement). See [Pitch tracking](#pitch-tracking-velocity-movement-and-spin).
 
@@ -164,13 +164,27 @@ Predictions with cross-validated R² below 0.25 are not shown as numbers.
 
 ### Filming
 
-- Tripod **behind home plate, on the line to the mound**, about 10-15 ft behind the plate and 4-6 ft high
-  (above the catcher's head if there is one), landscape. Behind the pitcher (raised, to the arm side) also
-  works but with much larger velocity errors (see below).
-- **Home plate and the pitching rubber** must both be visible in at least one frame: start recording before
-  the pitcher steps onto the rubber. No zoom, panning or tripod movement during the clip.
-- **240 fps.** Spin from the seams needs 240 fps and the ball at least ~14 px across near the plate (1080p);
-  at 120 fps you get velocity and movement, and the spin axis and active spin from the movement only.
+- **Just behind the pitcher (recommended, PitchLab's set-up):** tripod 3-6 ft behind the rubber and 1-2 ft
+  to the throwing-arm side, about chest high, upright (portrait) or landscape, aimed at the catcher so
+  **home plate is in the picture**. The ball is large and sharp as it leaves the hand, which is where the
+  spin is read, and the release is always seen.
+- **Keep filming until the ball is in the glove.** From behind, the ball flies straight away from the lens
+  and is too small to size over its far half; the catch (just behind the plate) fixes the far end of the
+  flight, the release the near end.
+- **Beside the release** (tripod 5-8 ft to the arm side, level with the rubber, aimed down the line) also
+  works, with wider velocity uncertainty.
+- **Measure where the camera stands** with a tape: lens height above the ground, how far ahead of the front
+  edge of the rubber along the line to home (negative behind it), and how far to the side of the
+  mound-plate line. From up close the rubber is usually out of the picture and the plate is a thin sliver
+  (about 40 x 3 px from behind the pitcher), too small to place the camera on its own, so these three
+  numbers stand in for the rubber.
+- **Behind home plate** (on the line to the mound, 10-15 ft back, 4-6 ft high) also works with no tape:
+  mark the plate and the rubber instead. Spin is then read near the plate, where the ball is smaller.
+- Home plate (and, behind the plate, the rubber) must be visible in at least one frame. No zoom, panning
+  or tripod movement during the clip.
+- **240 fps** and **1080p**. Seam spin needs 240 fps and the ball at least ~14 px across; at 120 fps you get
+  velocity and movement, and the spin axis and active spin from the movement only. At 720p from the
+  release the plate is only ~25 px wide, so the camera rests on the tape (see Limitations).
 - Daylight and a fast shutter: the ball has to stand out from what is behind it.
 - One pitch per clip; at most 10 s at 240 fps (trim on upload otherwise).
 
@@ -178,10 +192,12 @@ Predictions with cross-validated R² below 0.25 are not shown as numbers.
 
 1. **Pitch tracking -> New pitch**: upload the clip with the pitching distance (60 ft 6 in, 54, 50 or 46),
    throwing hand and, optionally, zone height, pitcher height and altitude.
-2. **Mark the field**: click the five corners of home plate and the two front corners of the rubber (any
-   order) on the people-removed background or on any frame, zoomed in. Optionally enter the camera's
-   measured lens height. *Check marks* solves the camera and draws the plate, rubber and strike zone over the
-   picture; marks from an earlier clip filmed from the same tripod position can be copied instead.
+2. **Mark the field**: click the five corners of home plate (any order) on the people-removed background
+   or on any frame, zoomed in, and enter the taped camera position (height, ahead of the rubber, to the
+   side). Filmed from behind the plate, click the two front corners of the rubber instead (the tape is then
+   optional). *Check marks* solves the camera and draws the plate, rubber and strike zone over the picture;
+   check that the reported camera position matches the tape. Marks from an earlier clip filmed from the
+   same tripod position can be copied instead.
 3. **Analyze pitch** (20-60 s): tracer video, numbers with one-SD uncertainties, strike-zone plot, and the
    seam fit (each ball crop with the fitted seam drawn on its stitches) for checking the spin by eye.
 4. If the release is marked *not seen*, step the tracer to the frame where the ball leaves the hand and use
@@ -189,10 +205,12 @@ Predictions with cross-validated R² below 0.25 are not shown as numbers.
 
 ### How it works (`pitchlab/flight/`)
 
-1. **Camera** (`geometry.py`): focal length and pose from the seven marks (every assignment of clicks to
-   corners is tried), then refined coarse-to-fine until the rendered outlines of the plate and the rubber
-   line up with the picture - hundreds of edge pixels instead of seven clicks, which matters because a 1 px
-   error on a far rubber 40 px wide is a 2.5% error in every speed.
+1. **Camera** (`geometry.py`): focal length and pose from the marks (every assignment of clicks to corners
+   is tried) and, when given, the taped camera position as a prior (height +-1.5 in, ground position +-3 in),
+   then refined coarse-to-fine until the rendered outlines of the plate (and rubber) line up with the
+   picture - hundreds of edge pixels instead of a few clicks, which matters because a 1 px error on a
+   far object 40 px wide is a 2.5% error in every speed. Outlines under 32 px are not refined, and a fit
+   whose marks miss by more than 3 px RMS is refused.
 2. **Ball** (`detect.py`, `blob.py`, `track.py`, `measure.py`): blobs that differ from the static background
    inside the projected pitching corridor; chains of them that move smoothly; the chain that fits as a pitch
    (30-110 mph toward the plate, from the mound, through the zone area; anything motionless is rejected).
@@ -202,6 +220,9 @@ Predictions with cross-validated R² below 0.25 are not shown as numbers.
    the calibrated camera. One camera cannot tell a pitch from a scaled copy of it about the lens, so the
    scale comes from the release distance (pitching distance minus extension) when the ball is seen leaving
    the hand, from the ball's apparent size (with a shared systematic factor, 5% prior), and from drag.
+   Filmed from behind the release, the far end is anchored the same way at the catch: when the track stops
+   inside the picture, before the video does, within 5 ft of the glove by the unanchored fit, its last point
+   is taken as just short of the glove, 0.5 +- 1 ft behind the plate's back tip.
    Movement is TrackMan-style: release to the front of the plate, relative to a spinless pitch. Tilt and an
    active-spin estimate come from the Magnus acceleration (Nathan's 2008 lift model, about +-20%).
    Uncertainties combine the fit covariance with refits for 32 calibration samples.
@@ -217,24 +238,39 @@ from synthetic 240 fps clips (`tests/flight_synth.py`: drag-and-Magnus flight, a
 whose seam shape and stitching differ from the estimator's, a moving pitcher, sensor noise, H.264 4:2:0),
 with clicks perturbed by 1-1.5 px. They are a best case for the method, not a field validation.
 
-| Measured on synthetic clips | Behind home plate | Behind the pitcher |
-|---|---|---|
-| Focal length after outline refinement (24 click draws) | SD 0.0%, bias -0.75% | SD 2.2%, bias +1.9% (21/24 refined) |
-| Release velocity, release seen (fastball / curveball) | +1.6 / -0.6 mph | +9.7 mph (reported +-3.8) |
-| Release velocity, release set by hand | +1.0 / -0.8 mph | - |
-| Release velocity, release not seen (ball size only) | up to about +-6 mph (reported +-4) | - |
-| IVB / HB | within about 1 in / 0.7 in | within about 4 in / 1 in |
-| Seam spin rate / axis (ball 18-36 px) | within 0.7% / 2.5 degrees | not measured (ball under 17 px) |
+| Measured on synthetic clips (1080p) | Behind the pitcher (PitchLab view, plate + tape) | Beside the release (plate + tape) | Behind home plate (plate + rubber) |
+|---|---|---|---|
+| Focal length after calibration | bias -1.9% | bias -1.9%; all 12 click draws within 4.5% | bias -0.55% |
+| Release velocity (fastball / curveball) | -0.7 / -2.1 mph (reported +-1.5 / +-1.2) | +0.9 / -1.4 mph (reported +-3.7 / +-3.0) | +1.8 / +0.05 mph (reported +-1.6 / +-1.2) |
+| IVB / HB | within 1.1 in / 0.6 in | within 0.3 in / 0.4 in | within 0.2 in / 0.8 in |
+| Plate location | within 1.0 in | within 1.5 in | within 0.6 in |
+| Extension | within 0.65 ft | within 0.4 ft | - |
+| Seam spin rate / axis | within 0.3% / 2.4 degrees | within 0.2% / 2.5 degrees | curveball 0.2% / 1.2 degrees; fastball rated low (10.7 degrees, not shown) |
+
+The synthetic catcher takes the ball 1 ft behind the plate's back tip, half a foot from the fit's 0.5 ft
+assumption: that difference alone is about 1% of the speed. Velocity and spin figures from other apps
+(PitchLab included) are estimates too, so a side-by-side on real pitches shows agreement, not error.
+A camera raised well behind the pitcher (5 m back, 2.6 m up) measured +9.7 mph before the catch anchor
+existed and has not been re-measured.
 
 ### Limitations
 
 - Not validated on real footage. Real clips add rolling shutter (a few milliseconds of skew between the
   top and the bottom of the frame), lens distortion, autofocus and exposure changes, scuffed or printed
   balls, and backgrounds the ball blends into.
+- Indoor facilities add LED flicker at 240 fps and other balls in flight in neighbouring tunnels; the
+  tracker keeps the one chain that flies from the mound through the zone, but none of this is simulated.
 - The ball's apparent size runs a few percent small when its lower half is in shadow; without a seen
   release the velocity rests on that size, hence the wider uncertainty.
 - Seam spin needs 240 fps (unambiguous below a quarter turn per frame: 3600 rpm at 240 fps) and a close,
   sharp ball; logos and dirt on the ball are not modelled.
+- From behind the pitcher, the speed leans on where the glove takes the ball (0.5 +- 1 ft behind the plate,
+  about 0.8 mph per half foot). A pitch that gets past the catcher and is lost within 5 ft of the plate,
+  or a catcher set well forward or back, shifts it; the result says when the catch was used.
+- From the release, the camera's scale rests on the taped position and a small, foreshortened plate: the
+  focal length runs about 2% short (so speeds about 1-2 mph off), and a tape error of a few inches moves
+  it further. At 720p the plate is too small to refine and about 1 in 12 click draws is refused as
+  inconsistent; film at 1080p.
 - Air density comes from the altitude entered (sea level by default); temperature and humidity are ignored.
 
 ## Data licence
