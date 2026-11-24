@@ -96,6 +96,13 @@ function stackTable(table, main = 0, wide = []) {
   return table;
 }
 
+// who set an event: amber when a person did (edited, set by hand), cool when the analysis did
+function sourceChip(source) {
+  if (!source) return el("span", { class: "small muted", text: "missing" });
+  const person = source === "edited" || source === "manual";
+  return el("span", { class: `chip ${person ? "person" : "instrument"}`, text: source === "manual" ? "set by you" : source });
+}
+
 function setNav(name) {
   document.querySelectorAll("[data-nav]").forEach(a => a.classList.toggle("active", a.dataset.nav === name));
 }
@@ -106,7 +113,7 @@ const flights = () => (flightView ??= flightViews({ el, api, section, errorBox, 
   uploadXHR, radioGroup, onTeardown: fn => teardown.push(fn), $view }));
 let swingView = null;
 const swings = () => (swingView ??= swingViews({ el, api, section, errorBox, badge, statusCell, stackTable, fmtDate, fmtNum,
-  fmtVal, fmtRange, ordinal, uploadXHR, radioGroup, onTeardown: fn => teardown.push(fn), getHealth: () => health, $view }));
+  fmtVal, fmtRange, ordinal, uploadXHR, radioGroup, onTeardown: fn => teardown.push(fn), getHealth: () => health, sourceChip, $view }));
 
 async function route() {
   teardown.forEach(f => { try { f(); } catch { /* ignore */ } });
@@ -135,11 +142,11 @@ async function loadHealth() {
   const box = document.getElementById("health");
   try {
     health = await api("/api/health");
-    const parts = [];
-    parts.push(health.reference.ok ? "Pitching reference ready" : "Pitching reference missing");
-    if (health.swing_reference) parts.push(health.swing_reference.ok ? "Hitting reference ready" : "Hitting reference missing");
-    parts.push(health.llm.configured ? `Claude reports: ${health.llm.model}` : "Claude reports: not configured");
-    box.textContent = parts.join(" · ");
+    const chip = (ok, yes, no) => el("span", { class: ok ? null : "off", text: ok ? yes : no });
+    box.replaceChildren(
+      chip(health.reference.ok, "Pitching reference ready", "Pitching reference missing"),
+      health.swing_reference ? chip(health.swing_reference.ok, "Hitting reference ready", "Hitting reference missing") : null,
+      chip(health.llm.configured, `Claude reports: ${health.llm.model}`, "Claude reports off"));
   } catch (e) {
     box.textContent = `Server unreachable: ${e.message}`;
   }
@@ -389,7 +396,7 @@ function renderDone(root, meta, r) {
         el("td", {}, EVENT_NAMES[k]),
         el("td", { class: "num", text: v === null ? "–" : String(v + 1) }),
         el("td", { class: "num", text: v === null ? "–" : `${fmtNum(msOf(v))} ms` }),
-        el("td", { class: "small muted", text: changed ? "edited" : (orig ? orig.source : "missing") }),
+        el("td", {}, sourceChip(changed ? "edited" : (orig ? orig.source : null))),
         el("td", { class: "actions-cell" }, el("button", { class: "ghost", text: "Go to", disabled: v === null, onclick: () => seek(v) }),
           el("button", { class: "ghost", text: "Set to current frame", onclick: () => { edits[k] = current(); renderEvents(); } }))));
     }
@@ -438,7 +445,7 @@ function renderDone(root, meta, r) {
     el("div", { class: "sub", text: "Driveline pitchers: 108-162 ms (5th-95th pct)" })));
   tiles.append(el("div", { class: "tile" }, el("div", { class: "label", text: "Video" }),
     el("div", { class: "value", text: `${fmtNum(fpsEff)} fps` }),
-    el("div", { class: "sub", text: `${r.quality.camera_view} view · ${r.athlete.throws === "R" ? "right" : "left"}-handed · ${r.video.width}×${r.video.height}` })));
+    el("div", { class: "sub", text: `${r.quality.camera_view} view, ${r.athlete.throws === "R" ? "right" : "left"}-handed, ${r.video.width}×${r.video.height}` })));
 
   const warnings = r.quality.warnings || [];
   const warnBlock = warnings.length ? el("div", { style: "margin-top:4px" }, el("h3", { text: `Data-quality warnings (${warnings.length})`, style: "margin-bottom:4px" }),

@@ -6,7 +6,7 @@ import { renderMarkdown } from "./markdown.js";
 
 export function swingViews(h) {
   const { el, api, section, errorBox, badge, statusCell, stackTable, fmtDate, fmtNum, fmtVal, fmtRange, ordinal,
-          uploadXHR, radioGroup, onTeardown, getHealth, $view } = h;
+          uploadXHR, radioGroup, onTeardown, getHealth, sourceChip, $view } = h;
   const EVENT_ORDER = ["lift", "load", "fp", "contact"];
   const EVENT_NAMES = { lift: "Leg lift", load: "Load (max hip coil)", fp: "Foot plant", contact: "Contact" };
   const EVENT_SHORT = { lift: "LIFT", load: "LOAD", fp: "FP", contact: "CONTACT" };
@@ -240,7 +240,7 @@ export function swingViews(h) {
           el("td", {}, EVENT_NAMES[k]),
           el("td", { class: "num", text: v === null ? "–" : String(v + 1) }),
           el("td", { class: "num", text: v === null ? "–" : `${fmtNum(msOf(v))} ms` }),
-          el("td", { class: "small muted", text: changed ? "edited" : (orig ? orig.source : "missing") }),
+          el("td", {}, sourceChip(changed ? "edited" : (orig ? orig.source : null))),
           el("td", { class: "actions-cell" }, el("button", { class: "ghost", text: "Go to", disabled: v === null, onclick: () => seek(v) }),
             el("button", { class: "ghost", text: "Set to current frame", onclick: () => { edits[k] = current(); renderEvents(); } }))));
       }
@@ -289,7 +289,7 @@ export function swingViews(h) {
       el("div", { class: "sub", text: fpct?.typical ? `Driveline hitters: ${fmtNum(fpct.typical["10"])}-${fmtNum(fpct.typical["90"])} ms (10th-90th pct)` : "" })));
     tiles.append(el("div", { class: "tile" }, el("div", { class: "label", text: "Video" }),
       el("div", { class: "value", text: `${fmtNum(fpsEff)} fps` }),
-      el("div", { class: "sub", text: `${r.quality.camera_view} view · ${sideName(r.athlete.bats)}-handed hitter · ${r.video.width}×${r.video.height}` })));
+      el("div", { class: "sub", text: `${r.quality.camera_view} view, ${sideName(r.athlete.bats)}-handed hitter, ${r.video.width}×${r.video.height}` })));
 
     const warnings = r.quality.warnings || [];
     const warnBlock = warnings.length ? el("div", { style: "margin-top:4px" }, el("h3", { text: `Data-quality warnings (${warnings.length})`, style: "margin-bottom:4px" }),

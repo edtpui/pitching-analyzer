@@ -1,0 +1,31 @@
+[
+ {
+  "mode": "redesign",
+  "depth": "full",
+  "scope": "app",
+  "shape": "app screen",
+  "theme": "console",
+  "axes": "dark/grotesk-sans/chromatic-amber",
+  "hero": "none (app)",
+  "nav": "top bar, three tool tabs, reference, status chips",
+  "footer": "none",
+  "imagery": "product (the app's own video, key frames, charts)",
+  "photos": [],
+  "entry": "pitchlab/static/app.css",
+  "fingerprint": "app-shell/hairline-sections/reading-sheet/mono-measured",
+  "sections": [
+   "list",
+   "upload form",
+   "results: player + reading",
+   "key frames",
+   "metrics table",
+   "charts",
+   "coaching",
+   "details"
+  ],
+  "signature": "the reading: the headline figure in the measured face; amber events a person set, cool the instrument",
+  "waived": [],
+  "prompt": "a local analysis tool for baseball coaches and players: pitching mechanics, pitch tracking and swing mechanics from a slow-motion clip",
+  "date": "2026-11-24"
+ }
+]

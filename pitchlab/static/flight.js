@@ -270,9 +270,9 @@ export function flightViews(h) {
       };
       marks.plate.forEach((p, i) => mark(p, `P${i + 1}`, "#4fc3ff"));
       marks.rubber.forEach((p, i) => mark(p, `R${i + 1}`, "#ff9a3c"));
-      counter.textContent = `Home plate ${marks.plate.length}/5 · rubber ${marks.rubber.length}/2` +
-        (marks.plate.length < 5 ? " · next: a corner of home plate" : marks.rubber.length === 1 ? " · next: the other front corner of the rubber"
-          : marks.rubber.length === 0 ? " · plate done (rubber only if it is in the picture)" : " · all marked");
+      counter.textContent = `Home plate ${marks.plate.length}/5, rubber ${marks.rubber.length}/2. ` +
+        (marks.plate.length < 5 ? "Next: a corner of home plate." : marks.rubber.length === 1 ? "Next: the other front corner of the rubber."
+          : marks.rubber.length === 0 ? "Plate done; mark the rubber only if it is in the picture." : "All marked.");
       check.disabled = !ready();
     }
 
@@ -513,7 +513,7 @@ export function flightViews(h) {
     const tiles = el("div", { class: "tiles" },
       tile("Velocity at release", `${num(p.release_speed_mph)} mph`, `${sd(u.release_speed_mph).trim() || ""} · ${num(p.plate_speed_mph)} mph at the plate · ${num(p.flight_time_s, 3)} s flight`),
       tile("Spin rate (seams)", spinOk ? `${Math.round(spin.rpm)} rpm` : "Not measured",
-        spinOk ? `${Math.round(spin.efficiency * 100)}% efficiency · ${Math.round(spin.gyro_deg)}° gyro · active ${Math.round(spin.active_rpm)} rpm` : (spin.reason || "needs 240 fps and a close, sharp ball"),
+        spinOk ? `${Math.round(spin.efficiency * 100)}% efficiency, ${Math.round(spin.gyro_deg)}° gyro, active ${Math.round(spin.active_rpm)} rpm` : (spin.reason || "needs 240 fps and a close, sharp ball"),
         spinOk ? el("span", { class: "tile-badge" }, badge(spin.confidence)) : null),
       tile("Spin axis (tilt)", spinOk ? spin.tilt_clock : (mv.tilt_clock || "–"),
         spinOk ? `${Math.round(spin.axis_deg)}° · from the seams; movement says ${mv.tilt_clock || "–"}` : `${Math.round(mv.axis_deg ?? 0)}° · from the movement (seams not read)`),

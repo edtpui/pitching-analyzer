@@ -19,6 +19,21 @@ compared with 677 swings from 98 Driveline hitters. See [Swing mechanics](#swing
 Everything runs locally: pose estimation is MediaPipe on the CPU, and the web app is FastAPI plus plain
 HTML/JS. The only network call is the optional Claude report, which sends numbers, never the video.
 
+## The interface
+
+One app with three tabs (Pitching mechanics, Pitch tracking, Swing mechanics) and the reference pages. The
+look follows the Hallmark *Console* theme: a graphite ground (a light paper version when the system is in
+light mode), hairline sections instead of stacked boxes, and measured values (readings, frames, timings,
+chart ticks) in a monospaced face. Two colours keep fixed meanings: **amber is a person** (the primary
+button, the active tab, the video playhead, an event you edited) and **cool blue is the instrument** (an
+event the analysis detected, chart series, where a metric falls on its distribution). On a result page the
+headline figure (estimated velocity, bat speed or release speed) is set large at the top of the readings.
+
+The theme names Host Grotesk and Atkinson Hyperlegible Mono but does not load them, so the app makes no font
+requests; the system sans and monospace stand in. The styles are `pitchlab/static/tokens.css` (colours, type,
+spacing), `base.css` (resets and accessibility defaults) and `app.css` (the screens); `app.css` opens with the
+Hallmark stamp, and `.hallmark/log.json` records the redesign.
+
 ## Run it
 
 ```powershell
@@ -458,6 +473,7 @@ pitchlab/            analysis package + FastAPI server (server.py) + static web 
   swing/             swing mechanics: preprocess, events, kinematics, metrics, driveline, reference, model,
                      coaching, render, pipeline, jobs, api (routes under /api/swings)
   static/swing.js    swing pages (list, upload, results, hitting reference)
+  static/tokens.css, base.css, app.css   the Console theme's tokens, the base rules, the screens
 scripts/             fetch_assets.py, build_reference.py (pitching); swing_fetch_assets.py, swing_build_reference.py
 tests/               pytest suite (synthetic skeletons, virtual-camera Driveline clips, API, rendering;
                      flight_synth.py renders synthetic ball-flight clips for test_flight.py;
