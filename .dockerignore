@@ -5,5 +5,7 @@
 **/__pycache__
 data
 assets/driveline
+assets/swing/driveline
+assets/swing/reference/reference_metrics.csv
 assets/reference/reference_metrics.csv
 assets/reference/build.log

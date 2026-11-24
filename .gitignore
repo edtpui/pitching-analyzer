@@ -8,5 +8,7 @@ assets/driveline/
 assets/models/
 # built from the Driveline data (re-create with scripts/build_reference.py)
 assets/reference/
+assets/swing/driveline/
+assets/swing/reference/
 # user uploads and analysis outputs
 data/

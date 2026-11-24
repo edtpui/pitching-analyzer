@@ -23,7 +23,7 @@ def client(monkeypatch):
 
 def test_everything_but_health_needs_the_password(client):
     assert client.get("/api/health").status_code == 200
-    for path in ("/", "/static/app.js", "/api/analyses", "/api/reference"):
+    for path in ("/", "/static/app.js", "/api/analyses", "/api/reference", "/api/swings", "/api/swings/reference", "/api/flights"):
         r = client.get(path)
         assert r.status_code == 401, path
         assert r.headers["www-authenticate"].startswith("Basic")

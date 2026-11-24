@@ -1,14 +1,20 @@
-# Pitch Mechanics Analyzer
+# Baseball Mechanics Analyzer
 
-Upload a phone video of one pitch and get back a skeleton overlay, the four key positions (peak knee
+Three analyses in one local web app: pitching mechanics, pitch tracking and swing mechanics.
+
+
+**Pitching mechanics:** upload a phone video of one pitch and get back a skeleton overlay, the four key positions (peak knee
 height, foot plant, max layback, release), 26 mechanics metrics with percentiles against 411 pitches from
 100 Driveline pitchers, the kinematic sequence, model estimates of velocity and elbow torque, and a
 coaching summary (rule-based, or written by Claude if an API key is set).
 
-A second section, **Pitch tracking**, measures the ball instead of the body: from a slow-motion clip filmed
+**Pitch tracking** measures the ball instead of the body: from a slow-motion clip filmed
 from just behind the pitcher, aimed at the catcher (as PitchLab films), it gives release and plate velocity, induced vertical and horizontal break, release point,
 plate location, and spin (rate, axis, efficiency and gyro from the seams; tilt and active spin from the
 movement). See [Pitch tracking](#pitch-tracking-velocity-movement-and-spin).
+
+**Swing mechanics:** upload a phone video of one swing for the hitting counterpart of the pitching analysis,
+compared with 677 swings from 98 Driveline hitters. See [Swing mechanics](#swing-mechanics).
 
 Everything runs locally: pose estimation is MediaPipe on the CPU, and the web app is FastAPI plus plain
 HTML/JS. The only network call is the optional Claude report, which sends numbers, never the video.
@@ -26,6 +32,8 @@ py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install fastapi uvicorn python-multipart mediapipe==1.2.3 numpy scipy pandas scikit-learn joblib imageio-ffmpeg anthropic pytest httpx
 .\.venv\Scripts\python.exe scripts\fetch_assets.py        # Driveline data (sha256-checked) + pose models, ~75 MB
 .\.venv\Scripts\python.exe scripts\build_reference.py     # calibration, validation, reference, models (~5 min)
+.\.venv\Scripts\python.exe scripts\swing_fetch_assets.py      # Driveline hitting data (sha256-checked), ~290 MB unpacked
+.\.venv\Scripts\python.exe scripts\swing_build_reference.py   # hitting reference and models (5-9 min)
 ```
 
 Optional: copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` to enable the Claude report
@@ -46,7 +54,7 @@ volume, separate from the local `data\` folder used by `run.ps1`. Optional setti
 `docker compose up -d` again after changing it. `docker build --target test .` runs the test suite in the
 Linux image. To stop sharing: `tailscale serve --https=8444 off`.
 
-## Filming
+## Filming (pitching mechanics)
 
 - Slow motion: 240 fps if possible, 120 fps minimum. At 30/60 fps the arm at release is a blur.
 - Tripod; no zooming or panning. Foot plant, stride and momentum are measured against the still image.
@@ -273,6 +281,156 @@ existed and has not been re-measured.
   inconsistent; film at 1080p.
 - Air density comes from the altitude entered (sea level by default); temperature and humidity are ignored.
 
+## Swing mechanics
+
+Upload a phone video of one swing (**Swing mechanics -> New swing**) and get back a skeleton overlay, the four
+key positions (leg lift, load, foot plant, contact), 25 mechanics metrics with percentiles against 677 swings
+from 98 Driveline hitters, the kinematic sequence, hand speed, model estimates of bat speed and exit velocity,
+and a coaching summary. It uses the same pose model, filtering and job queue as the pitching analysis; events,
+metrics, models and coaching rules are the swing's own (`pitchlab/swing/`), with its own reference bundle
+built from Driveline's hitting data (`assets/swing/`).
+
+### Filming
+
+- Slow motion: 240 fps if possible, 120 fps minimum. At 30/60 fps the hands blur through contact.
+- Tripod; no zooming or panning. The stride, foot plant and forward move are measured against the still image.
+- Side-on from the open side: facing the hitter's chest from across the plate (first-base side for a
+  right-handed hitter, third-base side for a left-hander), camera square to the pitcher-plate line, about
+  waist height. Straight behind the catcher also works but loses stride length and the forward move.
+- Whole body in frame from the stance through the follow-through; one swing per clip. Netting or people
+  between the camera and the hitter confuse the pose model.
+- If a slow-motion clip was exported to play slowed down, enter the real capture rate (e.g. 240) on upload.
+
+### How it works
+
+1. **Pose:** MediaPipe Pose Landmarker (full / heavy / lite) gives 2D image landmarks and pelvis-centred 3D
+   landmarks for every frame.
+2. **Clean-up:** left/right swaps are repaired (both hands sit on the bat, so arms are judged by the elbows),
+   short gaps interpolated, blurred hand frames bridged, and joints low-pass filtered (12 Hz body, 18 Hz arms).
+3. **Batting side:** a right-handed hitter turns counter-clockwise seen from above, a left-hander clockwise;
+   hips and shoulders turn about 100 degrees each, which the 3D pose shows whichever way the camera faces. The
+   striding foot decides if the turn is unclear. A setting that contradicts a clear turn is overridden (the
+   pose model may have mirrored the body), as the pitching analysis does with the throwing arm.
+4. **Lab frame:** the stride at foot plant sets the direction to the pitcher. A square camera keeps the image
+   axis instead; left-handers are mirrored so every formula assumes a right-hander.
+5. **Events:**
+   - *Contact*, side-on: the hands peak about 61 ms before contact and slow down while the bat whips through,
+     so contact is the peak of the hands' speed relative to the pelvis as the camera sees it, plus that offset.
+     From behind, the hands move along the camera axis, so contact is the mean of the 3D hand-speed peak and
+     the shoulder-rotation peak, each plus its own offset.
+   - *Foot plant*: the front foot is down flat - after the stride, the lead ankle is slow and back at its
+     planted height (side-on) or position (behind).
+   - *Load*: the maximum hip coil (most closed pelvis rotation) before foot plant.
+   - *Leg lift*: the highest lead-knee point, when the knee then drops at least 0.06 leg lengths.
+6. **Metrics** are geometric definitions (`pitchlab/swing/metrics.py`), identical for video and for the Driveline data.
+7. **Reference** (`scripts/swing_build_reference.py`): the same code runs on Driveline's 360 Hz joint centres after
+   simulating phone video: resampling to 240/120/60 fps, per-frame plus slowly drifting joint noise,
+   pelvis-centring, the app's filter, hand dropout around contact, and a perspective camera at a random tripod
+   position. Percentiles, confidence ratings, event calibration and the models all come from these clips.
+
+### What the Driveline data showed
+
+Three findings from the lab data shaped the event definitions:
+
+- Driveline's POI angles labelled `hs` are taken at the maximum hip coil: pelvis rotation at our load event
+  matches `pelvis_angle_hs_z` with r = 0.99 (means -25.3 vs -25.1 deg). The load metrics are validated there.
+- Driveline's POI foot-plant ("launch position") values are taken at an instant that matches neither the
+  published `fp_100_time` force-plate event (pelvis rotation r = 0.35) nor a foot-flat definition (r = 0.69),
+  whereas slow-changing quantities agree well (rear elbow r = 0.88). Foot-plant metrics therefore carry no
+  validity check and are rated on reliability alone.
+- The force-plate instant (100% body weight on the front plate) cannot be seen on video: some hitters land and
+  shift their weight 100-270 ms later with the foot still. Detecting it from video gave 23 ms median error and
+  pelvis-rotation-at-foot-plant reliability of r = 0.09, so foot plant is defined kinematically instead (front
+  foot down flat, a median 11 ms before `fp_100`).
+
+### Accuracy (measured on the Driveline data)
+
+**Validity** is this app's definition at the true events, compared with Driveline's published marker-based
+value where Driveline measures the same thing at the same instant ("–" = no such value). **Reliability** is the
+same metric from simulated side-on video with the app's own event detection, compared with the clean value.
+Confidence combines both (high: reliability and validity ≥ 0.8; medium: ≥ 0.6). Low-confidence metrics are
+displayed but never drive coaching findings. Values are always shown as measured, never rescaled onto
+Driveline's scale: a rescale makes a table value disagree with the time-series chart next to it, and would put
+related metrics (for example peak separation and separation at foot plant) on different scales. The
+validation page lists both means where the scales differ.
+
+| Metric | Validity r | Reliability r (240 / 120 / 60 fps) | Confidence at 240 fps |
+|---|---|---|---|
+| Stride length | – | 0.98 / 0.96 / 0.95 | high |
+| Stride direction | – | 0.96 / 0.93 / 0.90 | high |
+| Peak lead knee bend in the stride | 1.00 | 0.99 / 0.99 / 0.98 | high |
+| Lead knee flexion at foot plant | – | 0.86 / 0.79 / 0.73 | high |
+| Lead knee flexion at contact | – | 0.93 / 0.90 / 0.86 | high |
+| Lead knee extension, foot plant to contact | – | 0.88 / 0.82 / 0.75 | high |
+| Forward move: peak pelvis speed | 0.69 | 0.89 / 0.84 / 0.81 | medium |
+| Hip coil at load | 0.99 | 0.97 / 0.96 / 0.94 | high |
+| Shoulder coil at load | 0.75 | 0.95 / 0.92 / 0.89 | medium |
+| Pelvis rotation at foot plant | – | 0.61 / 0.55 / 0.48 | medium |
+| Shoulder rotation at foot plant | – | 0.64 / 0.45 / 0.44 | medium |
+| Hip-shoulder separation at foot plant | – | 0.75 / 0.70 / 0.55 | medium |
+| Peak hip-shoulder separation | 0.72 | 0.95 / 0.94 / 0.90 | medium |
+| Pelvis rotation at contact | – | 0.94 / 0.91 / 0.89 | high |
+| Forward tilt at load | 0.81 | 0.98 / 0.97 / 0.96 | high |
+| Peak side bend | 0.90 | 0.99 / 0.98 / 0.97 | high |
+| Rear elbow flexion at foot plant | – | 0.82 / 0.73 / 0.65 | high |
+| Rear elbow height at foot plant | – | 0.81 / 0.75 / 0.68 | high |
+| Lead elbow flexion at contact | – | 0.90 / 0.88 / 0.80 | high |
+| Peak pelvis rotation speed | 0.96 | 0.81 / 0.72 / 0.66 | high |
+| Peak shoulder rotation speed | 0.53 | 0.89 / 0.84 / 0.79 | low |
+| Peak lead arm speed | 0.94 | 0.79 / 0.77 / 0.70 | medium |
+| Peak hand speed | 0.66 | 0.87 / 0.80 / 0.77 | medium |
+| Pelvis-to-shoulder peak timing | – | 0.53 / 0.48 / 0.34 | low |
+| Foot plant to contact | – | 0.53 / 0.47 / 0.44 | low |
+
+Peak shoulder rotation speed is low because the shoulder joints ride on the shoulder blades: the shoulder line
+turns faster than Driveline's thorax segment (mean 1,210 vs 915 deg/s). Peak hand speed is compared with
+Driveline's Blast-style hand speed, which is absolute rather than relative to the pelvis.
+
+Event timing on simulated video, median / 90th-percentile absolute error (side-on; the hands blurred out of
+tracking around contact in 5% / 20% / 45% of clips at 240 / 120 / 60 fps):
+
+| Event | 240 fps | 120 fps | 60 fps |
+|---|---|---|---|
+| Contact | 5.6 / 14 ms | 5.6 / 18 ms | 8.3 / 19 ms |
+| Foot plant | 12.5 / 43 ms | 13.9 / 54 ms | 19.4 / 71 ms |
+| Load (max hip coil) | 15.3 / 79 ms | 22.2 / 108 ms | 27.8 / 157 ms |
+| Leg lift | 20.8 / 62 ms | 25.0 / 69 ms | 30.6 / 81 ms |
+
+From behind the catcher, contact from the 3D hands and shoulders times to 5.6 / 15 ms at 240 fps (the image
+signal alone missed by more than 50 ms in half the swings). The load error has a long tail because the hips
+often sit near maximum coil for a while; the values measured there change little, as the reliability of the
+load metrics shows.
+
+Models (5-fold cross-validation grouped by athlete, scored on simulated 240 fps clips):
+
+| Target | Inputs | MAE | R² | Guessing the mean | Height + weight only |
+|---|---|---|---|---|---|
+| Bat speed at contact | video metrics | 4.0 mph | -0.07 (hidden in app) | 3.8 mph | – |
+| Bat speed at contact | video metrics + height/weight | 3.2 mph | 0.29 | 3.8 mph | 3.5 mph |
+| Exit velocity | video metrics | 6.0 mph | -0.05 (hidden in app) | 5.8 mph | – |
+| Exit velocity | video metrics + height/weight | 5.4 mph | 0.12 (hidden in app) | 5.8 mph | 5.7 mph |
+
+Predictions with cross-validated R² below 0.25 are not shown as numbers.
+
+### Limitations
+
+- All accuracy numbers above come from **simulated** video built from lab data. Real phone footage adds motion
+  blur, occlusion (the bat, cage netting) and pose-model bias (MediaPipe's 3D depth in particular) that the
+  simulation only approximates, so treat the ratings as best case. The full pipeline has not yet been run on
+  real swing footage: the tests render Driveline swings into MediaPipe-format landmarks, and the one real
+  pose-model run in the suite is a clip with no person in it.
+- From behind the catcher, contact timing relies on MediaPipe's depth estimate for the hands and shoulders,
+  which is noisier on real footage than in the simulation. Reference percentiles and confidence ratings are
+  computed for the recommended side-on camera. Film side-on when you can.
+- Peak hand speed is measured relative to the pelvis and converted to mph with the height you enter; it is not
+  a bat-sensor reading. The bat itself is not tracked.
+- The reference group is 98 hitters, mostly college (517 of 677 swings), hitting machine pitches at about
+  65 mph from 40 ft. Youth hitters and game swings sit outside it.
+- Bat speed and exit velocity estimates are weak: the mechanics add little to height and weight, and exit
+  velocity depends on contact quality that body motion cannot show. Estimates with cross-validated R² below
+  0.25 are not shown as numbers.
+- One hitter in frame works best. With several people, the largest person in the first detection is tracked.
+
 ## Data licence
 
 The Driveline OpenBiomechanics data is CC BY-NC-SA 4.0, with additional exclusions for professional sports
@@ -297,12 +455,18 @@ pitchlab/            analysis package + FastAPI server (server.py) + static web 
   flight/            pitch tracking: geometry (camera), detect/blob/track/measure (ball), trajectory, spin,
                      render (tracer, seam strip), pipeline, jobs, api (routes under /api/flights)
   static/flight.js   pitch-tracking pages (list, upload, field marking, results)
-scripts/             fetch_assets.py, build_reference.py
+  swing/             swing mechanics: preprocess, events, kinematics, metrics, driveline, reference, model,
+                     coaching, render, pipeline, jobs, api (routes under /api/swings)
+  static/swing.js    swing pages (list, upload, results, hitting reference)
+scripts/             fetch_assets.py, build_reference.py (pitching); swing_fetch_assets.py, swing_build_reference.py
 tests/               pytest suite (synthetic skeletons, virtual-camera Driveline clips, API, rendering;
-                     flight_synth.py renders synthetic ball-flight clips for test_flight.py)
+                     flight_synth.py renders synthetic ball-flight clips for test_flight.py;
+                     test_swing_*.py and swing_synthetic.py cover the swing analysis)
 assets/              downloaded data, models and the built reference (gitignored)
 data/analyses/       uploads and results, one folder per analysis (gitignored)
 data/flights/        pitch-tracking uploads and results, one folder per pitch (gitignored)
+data/swings/         swing uploads and results, one folder per swing (gitignored)
+assets/swing/        Driveline hitting data and the hitting reference (gitignored except manifest.json)
 ```
 
 ## Tests
@@ -313,5 +477,6 @@ $env:PYTHONUTF8 = '1'; .\.venv\Scripts\python.exe -m pytest
 
 The camera tests render Driveline pitches through a virtual camera into MediaPipe-format landmarks and
 check that the video path reproduces the lab metrics. That covers right- and left-handers, side and behind
-views, angled cameras, a wrong handedness setting, and slow-motion capture rates. The Claude call is tested
+views, angled cameras, a wrong handedness setting, and slow-motion capture rates; the swing tests do the same
+with Driveline swings (left- and right-handed hitters, a wrong batting side, depth noise on the hands). The Claude call is tested
 against a fake client, so it makes no API requests.

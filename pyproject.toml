@@ -1,7 +1,7 @@
 [project]
 name = "pitching-analyzer"
 version = "0.1.0"
-description = "Pitching mechanics video analyzer calibrated against the Driveline OpenBiomechanics dataset"
+description = "Pitching mechanics, pitch tracking and swing mechanics from phone video, calibrated against the Driveline OpenBiomechanics datasets"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

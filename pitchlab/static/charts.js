@@ -112,6 +112,7 @@ export function lineChart(opts) {
       lastLabelX = X(ev.x);
     }
 
+    const placed = [];   // [x0, x1, y] of peak labels already drawn, so close peaks do not print over each other
     for (const s of opts.series) {
       let d = "";
       let pen = false;
@@ -128,8 +129,14 @@ export function lineChart(opts) {
         if (bi >= 0) {
           svg("circle", { cx: X(xs[bi]), cy: Y(s.values[bi]), r: 4, style: `fill:${s.color}`, class: "ring" }, root);
           const anchor = X(xs[bi]) > m.l + iw - 70 ? "end" : "start";
-          text(root, X(xs[bi]) + (anchor === "end" ? -7 : 7), Y(s.values[bi]) - 6, fmtNum(s.values[bi]),
-               { class: "direct-label", "text-anchor": anchor });
+          const label = fmtNum(s.values[bi]);
+          const lx = X(xs[bi]) + (anchor === "end" ? -7 : 7);
+          const w = label.length * 7;
+          const x0 = anchor === "end" ? lx - w : lx, x1 = x0 + w;
+          let ly = Y(s.values[bi]) - 6;
+          while (placed.some(p => x0 < p[1] && x1 > p[0] && Math.abs(ly - p[2]) < 12)) ly -= 12;
+          placed.push([x0, x1, ly]);
+          text(root, lx, ly, label, { class: "direct-label", "text-anchor": anchor, style: `fill:${s.color}` });
         }
       }
     }

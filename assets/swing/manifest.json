@@ -1,0 +1,45 @@
+{
+  "driveline/metadata.csv": {
+    "url": "https://raw.githubusercontent.com/drivelineresearch/openbiomechanics/main/baseball_hitting/data/metadata.csv",
+    "bytes": 48953,
+    "sha256": "b87567a7dbed13dd438a16512b80b80af81cf909e1203a89f545e6b31a245372",
+    "fetched_utc": "2026-11-23T01:14:50+00:00"
+  },
+  "driveline/poi_metrics.csv": {
+    "url": "https://raw.githubusercontent.com/drivelineresearch/openbiomechanics/main/baseball_hitting/data/poi/poi_metrics.csv",
+    "bytes": 717888,
+    "sha256": "95ab62e2c36e5034435f3edaec2d7d320caf9aa61eac923d907aed6751a2619b",
+    "fetched_utc": "2026-11-23T01:14:50+00:00"
+  },
+  "driveline/data_dictionary.csv": {
+    "url": "https://raw.githubusercontent.com/drivelineresearch/openbiomechanics/main/baseball_hitting/data/data_dictionary.csv",
+    "bytes": 17604,
+    "sha256": "e653ec388ea0a7f6409029f7986fa54e910a89972ff26446ec49979b49dd5181",
+    "fetched_utc": "2026-11-23T01:14:50+00:00"
+  },
+  "driveline/hitting_landmarks.zip": {
+    "url": "https://github.com/drivelineresearch/openbiomechanics/releases/download/dataset-v1/hitting_landmarks.zip",
+    "bytes": 65801815,
+    "sha256": "9cc2bdc94f5f5a6c5d540f4abe459caae2c5164cd53f6a6fd23f4b2b7283bcb3",
+    "fetched_utc": "2026-11-23T01:14:50+00:00",
+    "checksum_source": "https://raw.githubusercontent.com/drivelineresearch/openbiomechanics/main/scripts/release_checksums.sha256"
+  },
+  "models/pose_landmarker_lite.task": {
+    "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+    "bytes": 5777746,
+    "sha256": "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a",
+    "fetched_utc": "2026-11-23T01:14:50+00:00"
+  },
+  "models/pose_landmarker_full.task": {
+    "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",
+    "bytes": 9398198,
+    "sha256": "4eaa5eb7a98365221087693fcc286334cf0858e2eb6e15b506aa4a7ecdcec4ad",
+    "fetched_utc": "2026-11-23T01:14:50+00:00"
+  },
+  "models/pose_landmarker_heavy.task": {
+    "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task",
+    "bytes": 30664242,
+    "sha256": "64437af838a65d18e5ba7a0d39b465540069bc8aae8308de3e318aad31fcbc7b",
+    "fetched_utc": "2026-11-23T01:14:50+00:00"
+  }
+}

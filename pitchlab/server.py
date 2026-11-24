@@ -1,4 +1,5 @@
-"""FastAPI app: upload clips, follow progress, read results, correct events, request a Claude report.
+"""FastAPI app: pitching mechanics, pitch tracking and swing mechanics. Upload clips, follow progress, read
+results, correct events, request a Claude report.
 
 Run:  .venv\\Scripts\\python.exe -m pitchlab.server      (binds 127.0.0.1:8091 by default)
 """
@@ -23,6 +24,9 @@ from .config import ANALYSES_DIR, ANTHROPIC_MODEL, FLIGHTS_DIR, HOST, MAX_UPLOAD
 from .flight.api import make_router as make_flight_router
 from .flight.jobs import FlightJobs
 from .jobs import Jobs, NotFound, Worker
+from .swing.api import make_router as make_swing_router, reference_status as swing_reference_status
+from .swing.config import ANALYSES_DIR as SWINGS_DIR
+from .swing.jobs import SwingJobs
 from .pipeline import Options, read_json, recompute_with_events, write_json
 from .reference import ReferenceMissing, get_reference
 from .video_io import ALLOWED_EXTENSIONS
@@ -32,15 +36,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 KEYFRAME_RE = re.compile(r"^(pkh|fp|mer|br)\.jpg$")
 CHUNK = 1 << 20
 
-worker = Worker()                       # one analysis at a time, mechanics or ball flight
+worker = Worker()                       # one analysis at a time: pitching, ball flight or swing
 jobs = Jobs(ANALYSES_DIR, worker)
 flight_jobs = FlightJobs(FLIGHTS_DIR, worker)
+swing_jobs = SwingJobs(SWINGS_DIR, worker)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     jobs.start()
     flight_jobs.start()
+    swing_jobs.start()
     try:
         get_reference()
     except ReferenceMissing as exc:
@@ -48,10 +54,12 @@ async def lifespan(app: FastAPI):
     yield
     jobs.shutdown()
     flight_jobs.shutdown()
+    swing_jobs.shutdown()
 
 
-app = FastAPI(title="Pitching mechanics analyzer", version=__version__, lifespan=lifespan)
+app = FastAPI(title="Baseball mechanics analyzer", version=__version__, lifespan=lifespan)
 app.include_router(make_flight_router(flight_jobs))
+app.include_router(make_swing_router(swing_jobs))
 
 
 def _authorized(header: str) -> bool:
@@ -70,7 +78,7 @@ async def require_password(request: Request, call_next):
     probe needs HTTP Basic auth with that password; the user name is ignored. Browsers re-send the
     credentials on fetches, uploads and video range requests by themselves."""
     if PASSWORD and request.url.path != "/api/health" and not _authorized(request.headers.get("authorization", "")):
-        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Pitch Mechanics Analyzer", charset="UTF-8"'})
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Baseball Mechanics Analyzer", charset="UTF-8"'})
     return await call_next(request)
 
 
@@ -99,6 +107,7 @@ def health() -> dict:
         out["reference"] = {"ok": True, "built_utc": ref.bundle["built_utc"], "models": ref.models is not None}
     except ReferenceMissing as exc:
         out["reference"] = {"ok": False, "error": str(exc)}
+    out["swing_reference"] = swing_reference_status()
     out["llm"] = _llm_status()
     return out
 

@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Runtime needs only the pose models and the built reference bundle, not the raw Driveline data.
 COPY assets/models ./assets/models
 COPY assets/reference/reference.json assets/reference/models.joblib ./assets/reference/
+COPY assets/swing/reference/reference.json assets/swing/reference/models.joblib ./assets/swing/reference/
 COPY pitchlab ./pitchlab
 RUN useradd --create-home --uid 10001 pitchlab && mkdir /data && chown pitchlab /data
 

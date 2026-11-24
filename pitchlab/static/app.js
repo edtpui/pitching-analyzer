@@ -1,6 +1,7 @@
 import { bulletStrip, divergingBars, fmtNum, lineChart } from "./charts.js";
 import { renderMarkdown } from "./markdown.js";
 import { flightViews } from "./flight.js";
+import { swingViews } from "./swing.js";
 
 const $view = document.getElementById("view");
 let teardown = [];
@@ -52,7 +53,7 @@ function fmtRange(lo, hi, unit, decimals = 0) {
   const a = fmtNum(lo, decimals), b = fmtNum(hi, decimals);
   if (unit === "deg") return `${a}° – ${b}°`;
   if (unit === "% height") return `${a} – ${b}%`;
-  if (unit === "ms") return `${a} – ${b} ms`;
+  if (unit === "ms" || unit === "mph") return `${a} – ${b} ${unit}`;
   return `${a} – ${b}`;            // long units are shown once, in the value column
 }
 const ordinal = p => { const n = Math.round(p); const s = ["th", "st", "nd", "rd"]; const v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
@@ -103,6 +104,9 @@ function setNav(name) {
 let flightView = null;
 const flights = () => (flightView ??= flightViews({ el, api, section, errorBox, badge, statusCell, stackTable, fmtDate, fmtNum,
   uploadXHR, radioGroup, onTeardown: fn => teardown.push(fn), $view }));
+let swingView = null;
+const swings = () => (swingView ??= swingViews({ el, api, section, errorBox, badge, statusCell, stackTable, fmtDate, fmtNum,
+  fmtVal, fmtRange, ordinal, uploadXHR, radioGroup, onTeardown: fn => teardown.push(fn), getHealth: () => health, $view }));
 
 async function route() {
   teardown.forEach(f => { try { f(); } catch { /* ignore */ } });
@@ -110,10 +114,14 @@ async function route() {
   const h = location.hash || "#/";
   $view.replaceChildren();
   try {
-    if (h === "#/new") { setNav("new"); await viewNew(); }
+    if (h === "#/new") { setNav("list"); await viewNew(); }
     else if (h === "#/flights") { setNav("flights"); await flights().list(); }
     else if (h === "#/flights/new") { setNav("flights"); await flights().create(); }
     else if (h.startsWith("#/f/")) { setNav("flights"); await flights().detail(h.slice(4)); }
+    else if (h === "#/swings") { setNav("swings"); await swings().list(); }
+    else if (h === "#/swings/new") { setNav("swings"); await swings().create(); }
+    else if (h === "#/swings/reference") { setNav("reference"); await swings().reference(); }
+    else if (h.startsWith("#/s/")) { setNav("swings"); await swings().detail(h.slice(4)); }
     else if (h.startsWith("#/a/")) { setNav("list"); await viewAnalysis(h.slice(4)); }
     else if (h === "#/reference") { setNav("reference"); await viewReference(); }
     else { setNav("list"); await viewList(); }
@@ -128,7 +136,8 @@ async function loadHealth() {
   try {
     health = await api("/api/health");
     const parts = [];
-    parts.push(health.reference.ok ? `Reference data built ${new Date(health.reference.built_utc).toLocaleDateString()}` : "Reference data missing");
+    parts.push(health.reference.ok ? "Pitching reference ready" : "Pitching reference missing");
+    if (health.swing_reference) parts.push(health.swing_reference.ok ? "Hitting reference ready" : "Hitting reference missing");
     parts.push(health.llm.configured ? `Claude reports: ${health.llm.model}` : "Claude reports: not configured");
     box.textContent = parts.join(" · ");
   } catch (e) {
@@ -138,7 +147,7 @@ async function loadHealth() {
 
 // ------------------------------------------------------------------ list
 async function viewList() {
-  $view.append(el("div", { class: "page-head" }, el("h1", { text: "Analyses" }),
+  $view.append(el("div", { class: "page-head" }, el("h1", { text: "Pitching analyses" }),
     el("div", { class: "actions" }, el("a", { class: "button", href: "#/new", text: "New analysis" }))));
   const body = el("div");
   $view.append(body);
@@ -646,8 +655,9 @@ function downloadCsv(s, r, meta) {
 async function viewReference() {
   const ref = await api("/api/reference");
   const src = ref.source;
-  $view.append(el("div", { class: "page-head" }, el("h1", { text: "Reference data and validation" }),
-    el("span", { class: "muted small", text: `built ${fmtDate(ref.built_utc)} · analysis version ${ref.version}` })));
+  $view.append(el("div", { class: "page-head" }, el("h1", { text: "Pitching reference data and validation" }),
+    el("span", { class: "muted small", text: `built ${fmtDate(ref.built_utc)} · analysis version ${ref.version}` }),
+    el("div", { class: "actions" }, el("a", { class: "button secondary", href: "#/swings/reference", text: "Hitting reference" }))));
 
   $view.append(section("Source", null,
     el("p", {}, `${src.name}: ${src.n_pitches} pitches from ${src.n_athletes} pitchers (`,
