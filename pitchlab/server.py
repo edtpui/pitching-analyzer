@@ -19,8 +19,10 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .coaching import LLMUnavailable, claude_report, has_credentials
-from .config import ANALYSES_DIR, ANTHROPIC_MODEL, HOST, MAX_UPLOAD_MB, MODELS_DIR, PASSWORD, PORT
-from .jobs import Jobs, NotFound
+from .config import ANALYSES_DIR, ANTHROPIC_MODEL, FLIGHTS_DIR, HOST, MAX_UPLOAD_MB, MODELS_DIR, PASSWORD, PORT
+from .flight.api import make_router as make_flight_router
+from .flight.jobs import FlightJobs
+from .jobs import Jobs, NotFound, Worker
 from .pipeline import Options, read_json, recompute_with_events, write_json
 from .reference import ReferenceMissing, get_reference
 from .video_io import ALLOWED_EXTENSIONS
@@ -30,21 +32,26 @@ STATIC_DIR = Path(__file__).parent / "static"
 KEYFRAME_RE = re.compile(r"^(pkh|fp|mer|br)\.jpg$")
 CHUNK = 1 << 20
 
-jobs = Jobs(ANALYSES_DIR)
+worker = Worker()                       # one analysis at a time, mechanics or ball flight
+jobs = Jobs(ANALYSES_DIR, worker)
+flight_jobs = FlightJobs(FLIGHTS_DIR, worker)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     jobs.start()
+    flight_jobs.start()
     try:
         get_reference()
     except ReferenceMissing as exc:
         log.error("%s", exc)
     yield
     jobs.shutdown()
+    flight_jobs.shutdown()
 
 
 app = FastAPI(title="Pitching mechanics analyzer", version=__version__, lifespan=lifespan)
+app.include_router(make_flight_router(flight_jobs))
 
 
 def _authorized(header: str) -> bool:

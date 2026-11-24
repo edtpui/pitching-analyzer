@@ -5,6 +5,11 @@ height, foot plant, max layback, release), 26 mechanics metrics with percentiles
 100 Driveline pitchers, the kinematic sequence, model estimates of velocity and elbow torque, and a
 coaching summary (rule-based, or written by Claude if an API key is set).
 
+A second section, **Pitch tracking**, measures the ball instead of the body: from a slow-motion clip filmed
+behind home plate it gives release and plate velocity, induced vertical and horizontal break, release point,
+plate location, and spin (rate, axis, efficiency and gyro from the seams; tilt and active spin from the
+movement). See [Pitch tracking](#pitch-tracking-velocity-movement-and-spin).
+
 Everything runs locally: pose estimation is MediaPipe on the CPU, and the web app is FastAPI plus plain
 HTML/JS. The only network call is the optional Claude report, which sends numbers, never the video.
 
@@ -155,6 +160,83 @@ Predictions with cross-validated R² below 0.25 are not shown as numbers.
 - One pitcher in frame works best. With several people, the largest person in the first detection is
   tracked.
 
+## Pitch tracking (velocity, movement and spin)
+
+### Filming
+
+- Tripod **behind home plate, on the line to the mound**, about 10-15 ft behind the plate and 4-6 ft high
+  (above the catcher's head if there is one), landscape. Behind the pitcher (raised, to the arm side) also
+  works but with much larger velocity errors (see below).
+- **Home plate and the pitching rubber** must both be visible in at least one frame: start recording before
+  the pitcher steps onto the rubber. No zoom, panning or tripod movement during the clip.
+- **240 fps.** Spin from the seams needs 240 fps and the ball at least ~14 px across near the plate (1080p);
+  at 120 fps you get velocity and movement, and the spin axis and active spin from the movement only.
+- Daylight and a fast shutter: the ball has to stand out from what is behind it.
+- One pitch per clip; at most 10 s at 240 fps (trim on upload otherwise).
+
+### Using it
+
+1. **Pitch tracking -> New pitch**: upload the clip with the pitching distance (60 ft 6 in, 54, 50 or 46),
+   throwing hand and, optionally, zone height, pitcher height and altitude.
+2. **Mark the field**: click the five corners of home plate and the two front corners of the rubber (any
+   order) on the people-removed background or on any frame, zoomed in. Optionally enter the camera's
+   measured lens height. *Check marks* solves the camera and draws the plate, rubber and strike zone over the
+   picture; marks from an earlier clip filmed from the same tripod position can be copied instead.
+3. **Analyze pitch** (20-60 s): tracer video, numbers with one-SD uncertainties, strike-zone plot, and the
+   seam fit (each ball crop with the fitted seam drawn on its stitches) for checking the spin by eye.
+4. If the release is marked *not seen*, step the tracer to the frame where the ball leaves the hand and use
+   **Set release here**: that turns the measurement into time of flight over a known distance.
+
+### How it works (`pitchlab/flight/`)
+
+1. **Camera** (`geometry.py`): focal length and pose from the seven marks (every assignment of clicks to
+   corners is tried), then refined coarse-to-fine until the rendered outlines of the plate and the rubber
+   line up with the picture - hundreds of edge pixels instead of seven clicks, which matters because a 1 px
+   error on a far rubber 40 px wide is a 2.5% error in every speed.
+2. **Ball** (`detect.py`, `blob.py`, `track.py`, `measure.py`): blobs that differ from the static background
+   inside the projected pitching corridor; chains of them that move smoothly; the chain that fits as a pitch
+   (30-110 mph toward the plate, from the mound, through the zone area; anything motionless is rejected).
+   Every frame is then re-measured where the fit predicts the ball: centre and size from half-level
+   crossings of its outer edge on 48 radial lines and a circle fit (shading-, seam- and blur-tolerant).
+3. **Flight** (`trajectory.py`): the nine-parameter constant-acceleration model (PITCHf/x) fitted through
+   the calibrated camera. One camera cannot tell a pitch from a scaled copy of it about the lens, so the
+   scale comes from the release distance (pitching distance minus extension) when the ball is seen leaving
+   the hand, from the ball's apparent size (with a shared systematic factor, 5% prior), and from drag.
+   Movement is TrackMan-style: release to the front of the plate, relative to a spinless pitch. Tilt and an
+   active-spin estimate come from the Magnus acceleration (Nathan's 2008 lift model, about +-20%).
+   Uncertainties combine the fit covariance with refits for 32 calibration samples.
+4. **Spin** (`spin.py`): each large, sharp ball image becomes a seam map (darkness against a fitted shading
+   surface, plus redness); 6000 orientations of a 3D seam curve are scored against it; frame-to-frame
+   relative rotations (with the seam's 180-degree symmetries) vote for an angular velocity, refined jointly
+   over up to 20 frames with the camera's view direction for each frame. Fits rated low are not shown.
+
+### Accuracy (synthetic clips only)
+
+There is no real footage with radar or tracking-unit truth in this repository, so every number below comes
+from synthetic 240 fps clips (`tests/flight_synth.py`: drag-and-Magnus flight, a ray-traced seamed ball
+whose seam shape and stitching differ from the estimator's, a moving pitcher, sensor noise, H.264 4:2:0),
+with clicks perturbed by 1-1.5 px. They are a best case for the method, not a field validation.
+
+| Measured on synthetic clips | Behind home plate | Behind the pitcher |
+|---|---|---|
+| Focal length after outline refinement (24 click draws) | SD 0.0%, bias -0.75% | SD 2.2%, bias +1.9% (21/24 refined) |
+| Release velocity, release seen (fastball / curveball) | +1.6 / -0.6 mph | +9.7 mph (reported +-3.8) |
+| Release velocity, release set by hand | +1.0 / -0.8 mph | - |
+| Release velocity, release not seen (ball size only) | up to about +-6 mph (reported +-4) | - |
+| IVB / HB | within about 1 in / 0.7 in | within about 4 in / 1 in |
+| Seam spin rate / axis (ball 18-36 px) | within 0.7% / 2.5 degrees | not measured (ball under 17 px) |
+
+### Limitations
+
+- Not validated on real footage. Real clips add rolling shutter (a few milliseconds of skew between the
+  top and the bottom of the frame), lens distortion, autofocus and exposure changes, scuffed or printed
+  balls, and backgrounds the ball blends into.
+- The ball's apparent size runs a few percent small when its lower half is in shadow; without a seen
+  release the velocity rests on that size, hence the wider uncertainty.
+- Seam spin needs 240 fps (unambiguous below a quarter turn per frame: 3600 rpm at 240 fps) and a close,
+  sharp ball; logos and dirt on the ball are not modelled.
+- Air density comes from the altitude entered (sea level by default); temperature and humidity are ignored.
+
 ## Data licence
 
 The Driveline OpenBiomechanics data is CC BY-NC-SA 4.0, with additional exclusions for professional sports
@@ -176,10 +258,15 @@ pitchlab/            analysis package + FastAPI server (server.py) + static web 
   model.py           velocity / elbow-torque models
   coaching.py        rule findings + Claude report
   pipeline.py, jobs.py, render.py, video_io.py
+  flight/            pitch tracking: geometry (camera), detect/blob/track/measure (ball), trajectory, spin,
+                     render (tracer, seam strip), pipeline, jobs, api (routes under /api/flights)
+  static/flight.js   pitch-tracking pages (list, upload, field marking, results)
 scripts/             fetch_assets.py, build_reference.py
-tests/               pytest suite (synthetic skeletons, virtual-camera Driveline clips, API, rendering)
+tests/               pytest suite (synthetic skeletons, virtual-camera Driveline clips, API, rendering;
+                     flight_synth.py renders synthetic ball-flight clips for test_flight.py)
 assets/              downloaded data, models and the built reference (gitignored)
 data/analyses/       uploads and results, one folder per analysis (gitignored)
+data/flights/        pitch-tracking uploads and results, one folder per pitch (gitignored)
 ```
 
 ## Tests

@@ -1,5 +1,6 @@
 import { bulletStrip, divergingBars, fmtNum, lineChart } from "./charts.js";
 import { renderMarkdown } from "./markdown.js";
+import { flightViews } from "./flight.js";
 
 const $view = document.getElementById("view");
 let teardown = [];
@@ -99,6 +100,10 @@ function setNav(name) {
 }
 
 // ------------------------------------------------------------------ router
+let flightView = null;
+const flights = () => (flightView ??= flightViews({ el, api, section, errorBox, badge, statusCell, stackTable, fmtDate, fmtNum,
+  uploadXHR, radioGroup, onTeardown: fn => teardown.push(fn), $view }));
+
 async function route() {
   teardown.forEach(f => { try { f(); } catch { /* ignore */ } });
   teardown = [];
@@ -106,6 +111,9 @@ async function route() {
   $view.replaceChildren();
   try {
     if (h === "#/new") { setNav("new"); await viewNew(); }
+    else if (h === "#/flights") { setNav("flights"); await flights().list(); }
+    else if (h === "#/flights/new") { setNav("flights"); await flights().create(); }
+    else if (h.startsWith("#/f/")) { setNav("flights"); await flights().detail(h.slice(4)); }
     else if (h.startsWith("#/a/")) { setNav("list"); await viewAnalysis(h.slice(4)); }
     else if (h === "#/reference") { setNav("reference"); await viewReference(); }
     else { setNav("list"); await viewList(); }
@@ -173,10 +181,10 @@ function radioGroup(name, options, value) {
     el("label", {}, el("input", { type: "radio", name, value: v, checked: v === value }), label)));
 }
 
-function uploadXHR(fd, onProgress) {
+function uploadXHR(fd, onProgress, url = "/api/analyses") {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
-    x.open("POST", "/api/analyses");
+    x.open("POST", url);
     x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     x.onload = () => {
       let b = null;

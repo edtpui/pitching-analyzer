@@ -45,11 +45,33 @@ class NotFound(KeyError):
     pass
 
 
+class Worker:
+    """The one background thread every job queue shares: pose estimation and ball tracking each use every
+    CPU core, so two jobs at once would only slow each other down."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._executor: ThreadPoolExecutor | None = None
+
+    def submit(self, fn, *args) -> None:
+        with self._lock:
+            if self._executor is None:          # created lazily, and again after a shutdown
+                self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="analysis")
+            executor = self._executor
+        executor.submit(fn, *args)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+
 class Jobs:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, worker: Worker | None = None):
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
-        self._executor: ThreadPoolExecutor | None = None
+        self._worker = worker or Worker()
         self._lock = threading.Lock()
         self._live: dict[str, dict] = {}
         self._stopping = threading.Event()
@@ -117,11 +139,7 @@ class Jobs:
     # ---- queue
     def submit(self, analysis_id: str) -> None:
         self._write_meta(analysis_id, status="queued", stage="Waiting in queue", progress=0.0)
-        with self._lock:
-            if self._executor is None:          # created lazily, and again after a shutdown
-                self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="analysis")
-            executor = self._executor
-        executor.submit(self._run, analysis_id)
+        self._worker.submit(self._run, analysis_id)
 
     def update_summary(self, analysis_id: str, result: dict) -> None:
         self._write_meta(analysis_id, summary=summary_of(result))
@@ -170,7 +188,4 @@ class Jobs:
 
     def shutdown(self) -> None:
         self._stopping.set()
-        with self._lock:
-            executor, self._executor = self._executor, None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+        self._worker.shutdown()

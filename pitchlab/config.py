@@ -30,6 +30,7 @@ MODELS_DIR = ASSETS_DIR / "models"
 REFERENCE_DIR = ASSETS_DIR / "reference"          # built by scripts/build_reference.py
 DATA_DIR = Path(os.environ.get("PITCHLAB_DATA_DIR", ROOT / "data"))
 ANALYSES_DIR = DATA_DIR / "analyses"
+FLIGHTS_DIR = DATA_DIR / "flights"                 # ball-flight (velocity / spin) analyses
 
 HOST = os.environ.get("PITCHLAB_HOST", "127.0.0.1")
 PASSWORD = os.environ.get("PITCHLAB_PASSWORD", "")      # set -> HTTP Basic auth on every route but /api/health
